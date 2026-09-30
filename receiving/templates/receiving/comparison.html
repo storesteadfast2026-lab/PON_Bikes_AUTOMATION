@@ -1,0 +1,39 @@
+{% extends "receiving/base.html" %}
+{% block content %}
+<p><a href="{% url 'receiving:container_detail' container.pk %}">← Back to {{ container.identifier }}</a></p>
+<div class="title-row"><div><p class="eyebrow">Expected versus received</p><h1>{{ container.identifier }}</h1></div></div>
+{% if not client_batch or not received_batch %}
+<div class="message warning">Confirm both a client manifest and a first-scan file to obtain a complete comparison and client report.</div>
+{% endif %}
+<div class="metrics">
+  <div class="metric"><span>Advised</span><strong>{{ totals.expected }}</strong></div>
+  <div class="metric"><span>Received</span><strong>{{ totals.received }}</strong></div>
+  <div class="metric"><span>Variance</span><strong>{{ totals.difference }}</strong></div>
+  <div class="metric"><span>Exception codes</span><strong>{{ totals.exceptions }}</strong></div>
+</div>
+<section class="card">
+  <div class="title-row">
+    <div><p class="eyebrow">Final customer file</p><h2>Receiving Container Data</h2></div>
+    {% if client_report_ready %}<a class="button primary" href="{% url 'receiving:download_current_client_report' container.pk %}">Download {{ container.identifier }} Advised.xls</a>{% endif %}
+  </div>
+  <p>The Excel uses the confirmed client quantity as <strong>Advised</strong>, the confirmed first scan as <strong>Received</strong>, <strong>Var = Received − Advised</strong>, and writes <strong>New</strong> in Comment for products classified as new in this container.</p>
+  {% if client_batch and received_batch and not client_report_catalog_available %}<div class="message warning">Synchronize the Translogic product master first so New products can be classified safely.</div>{% endif %}
+  {% if client_report_rows %}
+  <div class="table-wrap"><table><thead><tr><th>Item Code</th><th>Item Name</th><th>Advised</th><th>Received</th><th>Var</th><th>Comment</th></tr></thead><tbody>
+  {% for row in client_report_rows %}<tr><td><code>{{ row.code }}</code></td><td>{{ row.item_name }}</td><td>{{ row.advised }}</td><td>{{ row.received }}</td><td>{{ row.variance }}</td><td>{% if row.comment %}<strong>{{ row.comment }}</strong>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  {% if client_report_exports %}
+  <h3>Previous downloaded copies</h3>
+  <div class="table-wrap"><table><thead><tr><th>Date</th><th>Products</th><th>File</th><th>Download</th></tr></thead><tbody>
+  {% for export in client_report_exports %}<tr><td>{{ export.generated_at|date:"d/m/Y H:i" }}</td><td>{{ export.row_count }}</td><td>{{ export.original_name }}</td><td><a href="{% url 'receiving:download_client_report' export.pk %}">Excel</a></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Comparison by product code</h2>
+  <div class="table-wrap"><table><thead><tr><th>Code</th><th>Advised</th><th>Received</th><th>Variance</th><th>Status</th></tr></thead><tbody>
+  {% for row in rows %}<tr class="status-{{ row.status|lower }}"><td><code>{{ row.code }}</code></td><td>{{ row.expected }}</td><td>{{ row.received }}</td><td>{{ row.difference }}</td><td><span class="badge">{{ row.status }}</span></td></tr>{% empty %}<tr><td colspan="5">No confirmed information is available.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}

@@ -1,0 +1,86 @@
+{% extends "receiving/base.html" %}
+{% block title %}Validate preview · {{ batch.source_file.container.identifier }}{% endblock %}
+{% block body_class %}wide-workflow-page{% endblock %}
+{% block content %}
+<div class="app-page-head">
+  <div>
+    <a class="app-back-link" href="{% url 'receiving:configure_import' batch.source_file_id %}?manual=1">← Change mapping</a>
+    <p class="eyebrow">Preview only · not confirmed</p>
+    <h1>Validate preview</h1>
+    <p class="app-page-subtitle">{{ batch.source_file.original_name }}</p>
+  </div>
+  <span class="app-context-chip">{{ batch.source_file.container.customer.code }} · {{ batch.source_file.container.identifier }}</span>
+</div>
+
+<nav class="app-stepper" aria-label="Import workflow">
+  <div class="app-step complete"><span class="app-step-number">✓</span><div><strong>Upload file</strong><small>Excel file selected</small></div></div>
+  <div class="app-step complete"><span class="app-step-number">✓</span><div><strong>Configure mapping</strong><small>Mapping processed</small></div></div>
+  <div class="app-step current"><span class="app-step-number">3</span><div><strong>Validate preview</strong><small>Review detected data</small></div></div>
+  <div class="app-step pending"><span class="app-step-number">4</span><div><strong>Confirm import</strong><small>Accept and continue</small></div></div>
+</nav>
+
+<section class="app-panel">
+  <div class="app-panel-head">
+    <div>
+      <h2>Normalized data</h2>
+      <p>Review the result before confirming it for this container.</p>
+    </div>
+    <span class="status-pill ready">Ready for review</span>
+  </div>
+
+  <div class="app-stat-strip preview-batch-stats">
+    <div><span class="stat-label">Source rows</span><strong>{{ batch.total_rows }}</strong></div>
+    <div><span class="stat-label">Workbook units</span><strong>{{ batch.total_units }}</strong></div>
+    {% if container_groups %}
+      <div><span class="stat-label">Containers</span><strong>{{ container_groups|length }}</strong></div>
+      <div><span class="stat-label">Current advised</span><strong>{% if current_group %}{{ current_group.units }}{% else %}—{% endif %}</strong></div>
+    {% else %}
+      <div><span class="stat-label">File</span><strong class="small-stat">{{ batch.source_file.original_name }}</strong></div>
+      <div><span class="stat-label">Status</span><strong class="small-stat">Preview only</strong></div>
+    {% endif %}
+  </div>
+
+  {% if container_groups %}
+  <section class="detected-container-panel preview-container-panel">
+    <div class="app-panel-head compact-head">
+      <div><h3>Containers in this manifest</h3><p>Confirming will keep each container independent.</p></div>
+      {% if multi_container %}<span class="status-pill working">{{ container_groups|length }} containers</span>{% endif %}
+    </div>
+    {% if not current_present %}
+      <div class="message error">The current container {{ batch.container.identifier }} is not present in this manifest. Confirmation is blocked.</div>
+    {% endif %}
+    <div class="detected-container-list">
+      {% for item in container_groups %}
+      <div class="detected-container-row {% if item.is_current %}current{% endif %}">
+        <div>
+          <strong>{{ item.identifier }}</strong>
+          <small>{% if item.is_current %}Current container{% elif item.exists %}Existing container — update manifest data{% else %}Will be created as PENDING · Job Order not assigned{% endif %}</small>
+        </div>
+        <div><span>{{ item.rows }} rows</span><strong>{{ item.units }} advised</strong></div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <div class="workbook-preview-wrap normalized-preview-wrap">
+    <table class="app-data-table normalized-preview-table">
+      <thead><tr><th>Source</th>{% if container_groups %}<th>Container</th>{% endif %}<th>Code</th><th>LongCode</th><th>Description</th><th>Qty</th><th>Location</th><th>Fill</th></tr></thead>
+      <tbody>
+      {% for line in lines %}
+        <tr><td>{{ line.source_sheet }}!{{ line.source_row }}</td>{% if container_groups %}<td><code>{{ line.container_identifier }}</code></td>{% endif %}<td><code>{{ line.code }}</code></td><td>{{ line.long_code }}</td><td title="{{ line.description }}">{{ line.description|truncatechars:60 }}</td><td>{{ line.quantity }}</td><td>{{ line.location }}</td><td>{{ line.fill_signature }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="preview-note">Showing up to the first 200 normalized rows. Confirm only after the codes, quantities and locations look correct.</div>
+</section>
+
+<div class="app-actionbar">
+  <a class="button secondary" href="{% url 'receiving:configure_import' batch.source_file_id %}?manual=1">Change mapping</a>
+  <form method="post" action="{% url 'receiving:confirm_batch' batch.pk %}" class="app-actionbar-primary">
+    {% csrf_token %}
+    {% if current_present %}<button class="button primary">Confirm import →</button>{% else %}<button class="button primary" disabled title="Current container is not present in the manifest">Confirm import →</button>{% endif %}
+  </form>
+</div>
+{% endblock %}

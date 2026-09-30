@@ -1,0 +1,431 @@
+{% extends "receiving/base.html" %}
+{% block body_class %}container-sidebar-page{% endblock %}
+{% block content %}
+<div class="home-workspace container-detail-workspace">
+  <aside class="home-sidebar container-detail-sidebar" aria-label="Recent containers">
+    <a class="button primary home-new-button" href="{% url 'receiving:dashboard' %}#new-container">+ New container</a>
+    {% include "receiving/_recent_containers_sidebar.html" with active_container_id=container.pk %}
+  </aside>
+
+  <section class="container-detail-main">
+<div class="workflow-header">
+  <div>
+    <p class="eyebrow">JOB ORDER</p>
+    <div class="workflow-title-line">
+      <h1>{% if container.job_order %}{{ container.job_order }}{% else %}Not assigned{% endif %}</h1>
+      <span class="workflow-status-pill {% if container.status == 'CLOSED' %}complete{% elif container.status == 'PENDING' %}pending{% else %}active{% endif %}">
+        {% if container.status == 'CLOSED' %}✓ Complete{% elif container.status == 'PENDING' %}○ Pending{% else %}◉ {{ container.get_status_display }}{% endif %}
+      </span>
+    </div>
+    <p class="workflow-container-id"><strong>{{ container.identifier }}</strong></p>
+    <p class="workflow-subtitle">
+      {{ container.customer.name }}
+      {% if container.container_date %} · Container date {{ container.container_date|date:"d/m/Y" }}{% endif %}
+    </p>
+  </div>
+  <a class="button secondary compact-button" href="{% url 'receiving:edit_container' container.pk %}">Edit container</a>
+</div>
+
+{% if not container.job_order %}
+<div class="message warning job-order-required-banner">
+  <strong>Job Order required.</strong> This container was loaded from a manifest and remains independent, but operational receiving cannot start until a unique Job Order is assigned.
+  <a class="button secondary compact" href="{% url 'receiving:edit_container' container.pk %}">Assign Job Order</a>
+</div>
+{% endif %}
+
+<section class="workflow-metrics" aria-label="Container summary">
+  <div class="workflow-metric"><span>Advised</span><strong>{{ workspace.expected_units }}</strong><small>Client manifest</small></div>
+  <div class="workflow-metric"><span>Received</span><strong>{{ workspace.received_units }}</strong><small>Confirmed first scan</small></div>
+  <div class="workflow-metric {% if workspace.variance != 0 %}attention{% endif %}"><span>Variance</span><strong>{{ workspace.variance }}</strong><small>{% if workspace.exception_count %}{{ workspace.exception_count }} product exception{{ workspace.exception_count|pluralize }}{% else %}No quantity exceptions{% endif %}</small></div>
+  <div class="workflow-metric"><span>New products</span><strong>{{ workspace.new_product_count }}</strong><small>{% if workspace.pending_new_codes %}{{ workspace.pending_new_codes|length }} require data{% else %}Product data current{% endif %}</small></div>
+</section>
+
+<nav class="workflow-stepper" aria-label="Receiving workflow" data-current-stage="{{ workspace.current_step }}">
+  <button type="button" data-stage-selector="1" aria-controls="receive" aria-selected="{% if workspace.current_step == 1 %}true{% else %}false{% endif %}" class="workflow-step {% if workspace.step1_complete %}complete{% elif workspace.current_step == 1 %}current{% else %}pending{% endif %}">
+    <span class="step-dot">{% if workspace.step1_complete %}✓{% else %}1{% endif %}</span>
+    <span><strong>Receive &amp; Scan</strong><small>{% if workspace.step1_complete %}Completed{% elif workspace.current_step == 1 %}Current step{% else %}Pending{% endif %}</small></span>
+  </button>
+  <button type="button" data-stage-selector="2" aria-controls="products" aria-selected="{% if workspace.current_step == 2 %}true{% else %}false{% endif %}" class="workflow-step {% if workspace.step2_complete %}complete{% elif workspace.current_step == 2 %}current{% else %}pending{% endif %}">
+    <span class="step-dot">{% if workspace.step2_complete %}✓{% else %}2{% endif %}</span>
+    <span><strong>Check Products</strong><small>{% if workspace.step2_complete %}Completed{% elif workspace.current_step == 2 %}Current step{% else %}Pending{% endif %}</small></span>
+  </button>
+  <button type="button" data-stage-selector="3" aria-controls="translogic" aria-selected="{% if workspace.current_step == 3 %}true{% else %}false{% endif %}" class="workflow-step {% if workspace.step3_complete %}complete{% elif workspace.current_step == 3 %}current{% else %}pending{% endif %}">
+    <span class="step-dot">{% if workspace.step3_complete %}✓{% else %}3{% endif %}</span>
+    <span><strong>Translogic</strong><small>{% if workspace.step3_complete %}Completed{% elif workspace.current_step == 3 %}Current step{% else %}Pending{% endif %}</small></span>
+  </button>
+  <button type="button" data-stage-selector="4" aria-controls="complete" aria-selected="{% if workspace.current_step == 4 %}true{% else %}false{% endif %}" class="workflow-step {% if container.status == 'CLOSED' %}complete{% elif workspace.current_step == 4 %}current{% else %}pending{% endif %}">
+    <span class="step-dot">{% if container.status == 'CLOSED' %}✓{% else %}4{% endif %}</span>
+    <span><strong>Complete</strong><small>{% if container.status == 'CLOSED' %}Completed{% elif workspace.current_step == 4 %}Current step{% else %}Pending{% endif %}</small></span>
+  </button>
+</nav>
+
+<div class="workflow-main-grid full-stage-view">
+  <div class="workflow-stages">
+    <details id="receive" data-stage-panel="1" data-always-open="true" open {% if workspace.current_step != 1 %}hidden{% endif %} class="workflow-stage workflow-stage-static {% if workspace.step1_complete %}is-complete{% endif %} {% if workspace.current_step == 1 %}is-current{% endif %}">
+      <summary>
+        <span class="stage-number">1</span>
+        <span class="stage-summary-copy"><strong>Receive &amp; Scan</strong><small>Client manifest and confirmed physical first scan</small></span>
+        <span class="stage-state {% if workspace.step1_complete %}ok{% else %}pending{% endif %}">{% if workspace.step1_complete %}✓ OK{% else %}Action required{% endif %}</span>
+      </summary>
+      <div class="stage-body">
+        <div class="compact-status-list">
+          <div class="compact-status-row">
+            <span class="status-icon {% if workspace.client_batch %}ok{% else %}pending{% endif %}">{% if workspace.client_batch %}✓{% else %}○{% endif %}</span>
+            <div><strong>Client manifest</strong><small>{% if workspace.client_source %}{{ workspace.client_source.original_name }} · {{ workspace.client_batch.total_units }} advised{% else %}Not confirmed{% endif %}</small>{% if workspace.client_source %}<small class="file-time-line"><b>Generated:</b> — (external file) · <b>Uploaded:</b> {{ workspace.client_source.uploaded_at|date:"d/m/Y H:i:s" }}</small>{% endif %}</div>
+            {% if workspace.client_source %}<a href="{% url 'receiving:configure_import' workspace.client_source.pk %}">Review</a>{% endif %}
+          </div>
+          <div class="compact-status-row">
+            <span class="status-icon {% if workspace.received_batch %}ok{% else %}pending{% endif %}">{% if workspace.received_batch %}✓{% else %}○{% endif %}</span>
+            <div><strong>First scan / received bikes</strong><small>{% if workspace.received_source %}{{ workspace.received_source.original_name }} · {{ workspace.received_batch.total_units }} received{% else %}Not confirmed{% endif %}</small>{% if workspace.received_source %}<small class="file-time-line"><b>Generated:</b> — (external file) · <b>Uploaded:</b> {{ workspace.received_source.uploaded_at|date:"d/m/Y H:i:s" }}</small>{% endif %}</div>
+            {% if workspace.received_source %}<a href="{% url 'receiving:configure_import' workspace.received_source.pk %}">Review</a>{% endif %}
+          </div>
+        </div>
+
+        {% if not workspace.step1_complete %}
+          <div class="stage-callout">Upload the missing file, verify the detected mapping and confirm the preview. The workflow returns here automatically after confirmation.</div>
+        {% endif %}
+
+        {% if container.status != 'CLOSED' %}
+        <details class="inline-advanced">
+          <summary>{% if workspace.step1_complete %}Replace or reload source files{% else %}Upload source files{% endif %}</summary>
+          <div class="source-upload-grid">
+            <form method="post" enctype="multipart/form-data" action="{% url 'receiving:upload_source' container.pk %}" class="mini-upload-card">
+              {% csrf_token %}<input type="hidden" name="kind" value="CLIENT">
+              <strong>Client manifest</strong>
+              <small class="expected-file-hint">Expected Container ID: <b>{{ container.identifier }}</b> · suggested filename: <code>*{{ container.identifier }}*.xlsx</code></small>
+              <input class="container-aware-file-input" data-expected-container="{{ container.identifier }}" type="file" name="file" accept=".xlsx,.xlsm" required>
+              <small class="filename-container-warning" hidden>Filename does not contain {{ container.identifier }}. This is a warning only; PON will still validate the workbook content.</small>
+              <button class="button secondary">Upload &amp; configure</button>
+            </form>
+            <form method="post" enctype="multipart/form-data" action="{% url 'receiving:upload_source' container.pk %}" class="mini-upload-card">
+              {% csrf_token %}<input type="hidden" name="kind" value="RECEIVED">
+              <strong>First scan</strong>
+              {% if container.job_order %}
+                <small class="expected-file-hint">Expected Container ID: <b>{{ container.identifier }}</b> · suggested filename: <code>*{{ container.identifier }}*.xlsx</code></small>
+                <input class="container-aware-file-input" data-expected-container="{{ container.identifier }}" type="file" name="file" accept=".xlsx,.xlsm" required>
+                <small class="filename-container-warning" hidden>Filename does not contain {{ container.identifier }}. This is a warning only; PON will still validate the workbook content.</small>
+                <button class="button secondary">Upload &amp; configure</button>
+              {% else %}
+                <small>Assign a unique Job Order before starting the First Scan.</small>
+                <a class="button secondary" href="{% url 'receiving:edit_container' container.pk %}">Assign Job Order</a>
+              {% endif %}
+            </form>
+          </div>
+        </details>
+        {% else %}<p class="file-note">Reopen this completed container before replacing source files.</p>{% endif %}
+      </div>
+    </details>
+
+    <details id="products" data-stage-panel="2" data-always-open="true" open {% if workspace.current_step != 2 %}hidden{% endif %} class="workflow-stage workflow-stage-static {% if workspace.step2_complete %}is-complete{% endif %} {% if workspace.current_step == 2 %}is-current{% endif %}">
+      <summary>
+        <span class="stage-number">2</span>
+        <span class="stage-summary-copy"><strong>Check Products</strong><small>Expected vs received and new Translogic product data</small></span>
+        <span class="stage-state {% if workspace.step2_complete %}ok{% else %}pending{% endif %}">{% if workspace.step2_complete %}✓ OK{% else %}Review{% endif %}</span>
+      </summary>
+      <div class="stage-body">
+        <div class="stage-mini-metrics">
+          <div><span>Advised</span><strong>{{ workspace.expected_units }}</strong></div>
+          <div><span>Received</span><strong>{{ workspace.received_units }}</strong></div>
+          <div><span>Variance</span><strong>{{ workspace.variance }}</strong></div>
+          <div><span>New products</span><strong>{{ workspace.new_product_count }}</strong></div>
+        </div>
+        <div class="stage-primary-actions" aria-label="Step 2 downloads">
+          {% if workspace.product_check_download_ready %}
+            <div class="stage-file-action">
+              <a class="button primary" href="{% url 'receiving:export_product_check' container.pk %}">Download Product Check + barcodes (.xlsx)</a>
+              <small><b>Generated:</b> {% if workspace.latest_product_check %}{{ workspace.latest_product_check.generated_at|date:"d/m/Y H:i:s" }}{% else %}Not generated yet{% endif %} · <b>Uploaded:</b> — (generated by PON)</small>
+            </div>
+          {% endif %}
+
+          {% if workspace.new_product_import_download_ready %}
+            <div class="stage-file-action">
+              <a class="button secondary" href="{% url 'receiving:export_new_products' container.pk %}">Download New Product Import</a>
+              <small><b>Generated:</b> {% if workspace.latest_new_product_import %}{{ workspace.latest_new_product_import.generated_at|date:"d/m/Y H:i:s" }}{% else %}Not generated yet{% endif %} · <b>Uploaded:</b> — (generated by PON)</small>
+            </div>
+          {% else %}
+            <div class="stage-action-status" aria-label="New Product Import status">
+              <strong>New Product Import</strong>
+              {% if not workspace.product_check_download_ready %}
+                <span>Pending — waiting for confirmed First Scan and Product Master.</span>
+              {% elif not container.container_date %}
+                <span>Pending — Container date is required.</span>
+              {% elif workspace.new_product_count == 0 and workspace.pbp_to_pon_count == 0 %}
+                <span>Not required — no New or PBP → PON products.</span>
+              {% elif workspace.pending_new_codes %}
+                <span>Pending — complete the required Translogic product data first.</span>
+              {% else %}
+                <span>Pending — Group1 mapping must be resolved.</span>
+              {% endif %}
+            </div>
+          {% endif %}
+        </div>
+
+        {% if workspace.latest_new_product_import %}
+        <section class="translogic-transfer-panel compact-transfer-panel" aria-label="New Product Import transfer">
+          <div class="file-card-head">
+            <div><span class="file-icon green">XLS</span><strong>New Product Import → Translogic</strong></div>
+            <span class="file-state {% if workspace.new_product_transfer.can_copy %}ok{% else %}pending{% endif %}">{% if workspace.new_product_transfer.can_copy %}Ready to copy{% else %}Review required{% endif %}</span>
+          </div>
+          <dl class="file-paths">
+            <dt>Generated file</dt><dd>{{ workspace.latest_new_product_import.original_name }}</dd>
+            <dt>Generated</dt><dd>{{ workspace.latest_new_product_import.generated_at|date:"d/m/Y H:i:s" }}</dd>
+            <dt>Detected Translogic pattern</dt><dd>{% if workspace.new_product_transfer.pattern %}<code>{{ workspace.new_product_transfer.pattern }}</code>{% else %}Not safely identified{% endif %}</dd>
+            {% if workspace.new_product_transfer.oldest %}<dt>Oldest file selected</dt><dd><strong>{{ workspace.new_product_transfer.oldest.name }}</strong> · {{ workspace.new_product_transfer.oldest.modified_at|date:"d/m/Y H:i:s" }}</dd>{% endif %}
+          </dl>
+          {% if workspace.new_product_transfer.can_copy %}
+            <a class="button secondary" href="{% url 'receiving:transfer_new_product_import' container.pk %}">Copy to Translogic</a>
+          {% else %}
+            <button class="button secondary" type="button" disabled>Copy to Translogic</button>
+            <p class="file-note">{{ workspace.new_product_transfer.reason }}</p>
+          {% endif %}
+          {% if workspace.new_product_transfer.last_transfer %}<p class="file-fact">Last copy: {{ workspace.new_product_transfer.last_transfer.timestamp_dt|date:"d/m/Y H:i:s" }} · {{ workspace.new_product_transfer.last_transfer.destination }} · verified.</p>{% endif %}
+        </section>
+        {% endif %}
+
+        {% if not workspace.step1_complete %}
+          <div class="stage-callout warning">Complete Receive &amp; Scan first.</div>
+        {% elif not workspace.catalog %}
+          <div class="stage-callout warning">The Translogic product master catalogue is not active. Synchronize it from the main dashboard.</div>
+        {% elif workspace.pending_new_codes %}
+          <div class="stage-callout warning"><strong>{{ workspace.pending_new_codes|length }} product{{ workspace.pending_new_codes|length|pluralize }}</strong> still require Long Name, Short Name, Group1 and dimensions before continuing.</div>
+          <a class="button primary" href="{% url 'receiving:product_check' container.pk %}">Complete product data</a>
+        {% else %}
+          <div class="stage-callout success">Expected vs received has been calculated and all product data required by Translogic is complete.</div>
+        {% endif %}
+        <div class="stage-secondary-actions">
+          <a class="button secondary" href="{% url 'receiving:comparison' container.pk %}">View expected vs received details</a>
+          <a class="button secondary" href="{% url 'receiving:product_check' container.pk %}">View product details</a>
+        </div>
+      </div>
+    </details>
+
+    <details id="translogic" data-stage-panel="3" data-always-open="true" open {% if workspace.current_step != 3 %}hidden{% endif %} class="workflow-stage workflow-stage-static {% if workspace.step3_complete %}is-complete{% endif %} {% if workspace.current_step == 3 %}is-current{% endif %}">
+      <summary>
+        <span class="stage-number">3</span>
+        <span class="stage-summary-copy"><strong>Translogic</strong><small>PRODUCT_MOVES reconciliation and UPStockSerial</small></span>
+        <span class="stage-state {% if workspace.step3_complete %}ok{% elif workspace.reconciliation and not workspace.reconciliation.ready %}error{% else %}pending{% endif %}">{% if workspace.step3_complete %}✓ OK{% elif workspace.reconciliation and not workspace.reconciliation.ready %}! Review{% else %}Pending{% endif %}</span>
+      </summary>
+      <div class="stage-body">
+        <div class="stage-mini-metrics">
+          <div><span>First scan</span><strong>{% if workspace.received_batch %}{{ workspace.received_batch.total_units }}{% else %}—{% endif %}</strong></div>
+          <div><span>Movements</span><strong>{% if workspace.moves_import %}{{ workspace.moves_import.row_count }}{% else %}—{% endif %}</strong></div>
+          <div><span>Products</span><strong>{% if workspace.moves_import %}{{ workspace.moves_product_count }}{% else %}—{% endif %}</strong></div>
+          <div><span>Matched</span><strong>{% if workspace.reconciliation %}{{ workspace.reconciliation.matched_units }}{% else %}—{% endif %}</strong></div>
+        </div>
+
+        {% if not workspace.step2_complete %}
+          <div class="stage-callout warning">Complete the product check before preparing Translogic movement data.</div>
+        {% elif not workspace.moves_import %}
+          <div class="stage-callout">{% if workspace.product_moves_direct %}PRODUCT_MOVES is being read directly from the verified Translogic source.{% else %}Direct Translogic access is not verified; the existing local working-copy/manual-upload fallback remains active.{% endif %}</div>
+          <form method="post" action="{% url 'receiving:sync_product_moves' container.pk %}">
+            {% csrf_token %}<input type="hidden" name="return_to" value="workspace">
+            <button class="button primary" {% if not workspace.product_moves_available %}disabled{% endif %}>Refresh PRODUCT_MOVES</button>
+          </form>
+        {% elif workspace.reconciliation and not workspace.reconciliation.ready %}
+          <div class="stage-callout error"><strong>Reconciliation needs review.</strong> First Scan and PRODUCT_MOVES do not match product-by-product. UPStockSerial generation is blocked.</div>
+          <div class="stage-secondary-actions">
+            <form method="post" action="{% url 'receiving:sync_product_moves' container.pk %}">
+              {% csrf_token %}<input type="hidden" name="return_to" value="workspace"><button class="button secondary">Refresh PRODUCT_MOVES</button>
+            </form>
+            <a class="button secondary" href="{% url 'receiving:stage2' container.pk %}">View mismatch details</a>
+          </div>
+        {% else %}
+          <div class="stage-callout success"><strong>READY.</strong> Product quantities match and {{ workspace.reconciliation.matched_units }} movements are reconciled to physical bikes.</div>
+          {% if workspace.upstock_stale %}<div class="stale-note">The previous UPStockSerial is outdated because an input changed. The current file will be refreshed automatically when you download it.</div>{% endif %}
+        {% endif %}
+
+        <section class="translogic-transfer-panel" aria-label="UPStockSerial transfer">
+          <div class="file-card-head"><div><span class="file-icon blue">CSV</span><strong>UPStockSerial.csv</strong></div><span class="file-state {% if workspace.upstock_download_ready or workspace.upstock_ready %}ok{% else %}pending{% endif %}">{% if workspace.upstock_download_ready or workspace.upstock_ready %}Ready{% else %}Waiting{% endif %}</span></div>
+          <dl class="file-paths">
+            <dt>Source file path</dt><dd>{{ workspace.paths.upstock_working }}</dd>
+            <dt>Translogic destination path</dt><dd>{{ workspace.paths.upstock_final }}</dd>
+            <dt>Generated</dt><dd>{% if workspace.latest_upstock %}{{ workspace.latest_upstock.generated_at|date:"d/m/Y H:i:s" }}{% else %}Not generated yet{% endif %}</dd>
+            <dt>Uploaded</dt><dd>— (generated by PON)</dd>
+            <dt>Destination availability</dt><dd>{% if workspace.upstock_transfer.destination_accessible %}<span class="text-success">Accessible from PON</span>{% else %}<span class="text-warning">Not directly accessible from PON</span>{% endif %}</dd>
+            <dt>Existing destination file</dt><dd>{% if workspace.upstock_transfer.destination_exists %}Yes{% if workspace.upstock_transfer.destination_modified %} · {{ workspace.upstock_transfer.destination_modified|date:"d/m/Y H:i:s" }}{% endif %}{% else %}No{% endif %}</dd>
+          </dl>
+          <div class="transfer-actions">
+            {% if workspace.upstock_download_ready or workspace.upstock_ready %}<a class="button primary" href="{% url 'receiving:download_current_upstockserial' container.pk %}">Download file</a>{% endif %}
+            {% if workspace.upstock_transfer.can_copy %}<a class="button secondary" href="{% url 'receiving:transfer_upstockserial' container.pk %}">Copy to Translogic</a>{% else %}<button class="button secondary" type="button" disabled>Copy to Translogic</button>{% endif %}
+          </div>
+          {% if workspace.upstock_transfer.reason %}<p class="file-note">{{ workspace.upstock_transfer.reason }}</p>{% endif %}
+          {% if workspace.upstock_transfer.last_transfer %}<p class="file-fact">Last copy: {{ workspace.upstock_transfer.last_transfer.timestamp_dt|date:"d/m/Y H:i:s" }} · {{ workspace.upstock_transfer.last_transfer.destination }} · verified.</p>{% endif %}
+        </section>
+
+        <details class="inline-advanced">
+          <summary>Manual PRODUCT_MOVES upload / detailed reconciliation</summary>
+          <form method="post" enctype="multipart/form-data" action="{% url 'receiving:upload_product_moves' container.pk %}" class="manual-csv-form">
+            {% csrf_token %}<input type="hidden" name="return_to" value="workspace">{{ moves_upload_form.file }}<button class="button secondary">Upload CSV manually</button>
+          </form>
+          <a class="text-link" href="{% url 'receiving:stage2' container.pk %}">Open detailed Translogic screen</a>
+        </details>
+      </div>
+    </details>
+
+    <details id="complete" data-stage-panel="4" data-always-open="true" open {% if workspace.current_step != 4 %}hidden{% endif %} class="workflow-stage workflow-stage-static {% if container.status == 'CLOSED' %}is-complete{% endif %} {% if workspace.current_step == 4 %}is-current{% endif %}">
+      <summary>
+        <span class="stage-number">4</span>
+        <span class="stage-summary-copy"><strong>Complete</strong><small>Review outputs, transfer to Translogic and close the container</small></span>
+        <span class="stage-state {% if container.status == 'CLOSED' %}ok{% elif workspace.ready_to_complete %}ready{% else %}pending{% endif %}">{% if container.status == 'CLOSED' %}✓ Complete{% elif workspace.ready_to_complete %}Ready{% else %}Pending{% endif %}</span>
+      </summary>
+      <div class="stage-body">
+        {% if workspace.report_download_ready or workspace.report_ready %}
+          {% if workspace.report_stale %}<div class="stale-note">The previous customer report is outdated because source/product data changed. The current file will be refreshed automatically when you download it.</div>{% endif %}
+          <div class="stage-callout success">Customer report is available for download.</div>
+          <a class="button primary" href="{% url 'receiving:download_current_client_report' container.pk %}">Download {{ container.identifier }} Advised.xls</a>
+        {% else %}
+          <div class="stage-callout warning">Customer report is not available yet. Confirm the Client Manifest, First Scan and product master first.</div>
+        {% endif %}
+
+        {% if workspace.ready_to_complete and container.status != 'CLOSED' %}
+          <div class="completion-box">
+            <strong>Ready to complete</strong>
+            <p>After you have reviewed the files, imported UPStockSerial in Translogic and printed the labels, mark this container complete.</p>
+            <form method="post" action="{% url 'receiving:mark_container_complete' container.pk %}">{% csrf_token %}<button class="button primary">Mark container Complete</button></form>
+          </div>
+        {% elif container.status == 'CLOSED' %}
+          <div class="completion-box complete">
+            <strong>✓ Container complete</strong>
+            <p>You can still review every stage. Reopen only if source data or downloaded outputs must be corrected.</p>
+            <form method="post" action="{% url 'receiving:reopen_container' container.pk %}">{% csrf_token %}<button class="button secondary">Reopen container</button></form>
+          </div>
+        {% endif %}
+      </div>
+    </details>
+  </div>
+
+  <aside class="workflow-status-panel">
+    <p class="eyebrow">Current status</p>
+    <h2>{% if container.status == 'CLOSED' %}Complete{% else %}Container progress{% endif %}</h2>
+    <div class="workflow-checklist">
+      <div class="check-row {% if workspace.client_batch %}done{% endif %}"><span>{% if workspace.client_batch %}✓{% else %}○{% endif %}</span> Client manifest confirmed</div>
+      <div class="check-row {% if workspace.received_batch %}done{% endif %}"><span>{% if workspace.received_batch %}✓{% else %}○{% endif %}</span> First Scan confirmed</div>
+      <div class="check-row {% if workspace.step1_complete %}done{% endif %}"><span>{% if workspace.step1_complete %}✓{% else %}○{% endif %}</span> Expected vs Received calculated</div>
+      <div class="check-row {% if workspace.products_ready %}done{% endif %}"><span>{% if workspace.products_ready %}✓{% else %}○{% endif %}</span> Translogic product data complete</div>
+      <div class="check-row {% if workspace.moves_import %}done{% endif %}"><span>{% if workspace.moves_import %}✓{% else %}○{% endif %}</span> PRODUCT_MOVES loaded</div>
+      <div class="check-row {% if workspace.upstock_ready %}done{% elif workspace.upstock_stale %}stale{% endif %}"><span>{% if workspace.upstock_ready %}✓{% elif workspace.upstock_stale %}!{% else %}○{% endif %}</span> UPStockSerial current</div>
+      <div class="check-row {% if workspace.report_ready %}done{% elif workspace.report_stale %}stale{% endif %}"><span>{% if workspace.report_ready %}✓{% elif workspace.report_stale %}!{% else %}○{% endif %}</span> Customer report current</div>
+    </div>
+
+    <div class="next-action-box">
+      <span>Next action</span>
+      {% if container.status == 'CLOSED' %}
+        <strong>Process complete.</strong><p>Review any stage above, or reopen the container if a correction is required.</p>
+      {% elif workspace.current_step == 1 %}
+        <strong>Complete Receive &amp; Scan.</strong><p>Confirm both the client manifest and physical first scan.</p>
+      {% elif workspace.current_step == 2 %}
+        <strong>Complete the product check.</strong><p>{% if workspace.pending_new_codes %}Finish {{ workspace.pending_new_codes|length }} new product record{{ workspace.pending_new_codes|length|pluralize }}.{% else %}Review the product comparison and catalogue status.{% endif %}</p>
+      {% elif workspace.current_step == 3 %}
+        {% if not workspace.moves_import %}<strong>Load PRODUCT_MOVES.</strong><p>Copy the Translogic export to the working location, then refresh.</p>
+        {% elif workspace.reconciliation and not workspace.reconciliation.ready %}<strong>Resolve the movement mismatch.</strong><p>Open the details to see only the products that do not match.</p>
+        {% else %}<strong>Download UPStockSerial.</strong><p>The current file is prepared automatically when you download it.</p>{% endif %}
+      {% else %}
+        {% if not workspace.report_ready %}<strong>Download the customer report.</strong><p>The current report is prepared automatically when you download it.</p>
+        {% else %}<strong>Finish in Translogic.</strong><p>Import UPStockSerial, print labels, then mark this container Complete.</p>{% endif %}
+      {% endif %}
+    </div>
+  </aside>
+</div>
+
+<section class="workflow-files-section">
+  <div class="section-heading-row"><div><p class="eyebrow">Files</p><h2>Working &amp; final locations</h2></div><p class="muted compact-copy">Operational paths stay visible so you always know where the app read or wrote each file.</p></div>
+  <div class="workflow-file-grid">
+    <article class="workflow-file-card">
+      <div class="file-card-head"><div><span class="file-icon">CSV</span><strong>PRODUCT_MOVES.csv</strong></div><span class="file-state {% if workspace.moves_import %}ok{% else %}pending{% endif %}">{% if workspace.moves_import %}Loaded{% else %}Waiting{% endif %}</span></div>
+      <dl class="file-paths">
+        <dt>Translogic source</dt><dd>{{ workspace.paths.moves_source }}</dd>
+        <dt>App working copy</dt><dd>{{ workspace.paths.moves_working }}</dd>
+        <dt>Refresh source</dt><dd><strong>{{ workspace.product_moves_refresh_mode }}</strong></dd>
+      </dl>
+      <p class="file-time-line"><b>Generated:</b> — (generated by Translogic) · <b>Uploaded:</b> {% if workspace.moves_import %}{{ workspace.moves_import.imported_at|date:"d/m/Y H:i:s" }}{% else %}Not uploaded yet{% endif %}</p>
+      {% if workspace.moves_import %}<p class="file-fact">✓ {{ workspace.moves_import.row_count }} rows · {{ workspace.moves_product_count }} products{% if workspace.reconciliation and workspace.reconciliation.ready %} · MATCH{% endif %}</p>{% endif %}
+      <form method="post" action="{% url 'receiving:sync_product_moves' container.pk %}">{% csrf_token %}<input type="hidden" name="return_to" value="workspace"><button class="button secondary wide-button" {% if not workspace.product_moves_available or container.status == 'CLOSED' %}disabled{% endif %}>Refresh working copy</button></form>
+    </article>
+
+    <article class="workflow-file-card">
+      <div class="file-card-head"><div><span class="file-icon blue">CSV</span><strong>UPStockSerial.csv</strong></div><span class="file-state {% if workspace.upstock_download_ready or workspace.upstock_ready %}ok{% else %}pending{% endif %}">{% if workspace.upstock_download_ready or workspace.upstock_ready %}Ready to download{% else %}Waiting{% endif %}</span></div>
+      <dl class="file-paths"><dt>Source file path</dt><dd>{{ workspace.paths.upstock_working }}</dd><dt>Translogic destination path</dt><dd>{{ workspace.paths.upstock_final }}</dd><dt>Destination availability</dt><dd>{% if workspace.upstock_transfer.destination_accessible %}<span class="text-success">Accessible from PON</span>{% else %}<span class="text-warning">Not directly accessible from PON</span>{% endif %}</dd><dt>Existing destination file</dt><dd>{% if workspace.upstock_transfer.destination_exists %}Yes{% if workspace.upstock_transfer.destination_modified %} · {{ workspace.upstock_transfer.destination_modified|date:"d/m/Y H:i:s" }}{% endif %}{% else %}No{% endif %}</dd></dl>
+      <p class="file-time-line"><b>Generated:</b> {% if workspace.latest_upstock %}{{ workspace.latest_upstock.generated_at|date:"d/m/Y H:i:s" }}{% else %}Not generated yet{% endif %} · <b>Uploaded:</b> — (generated by PON)</p>
+      {% if workspace.upstock_ready %}<p class="file-fact">✓ {{ workspace.latest_upstock.row_count }} bike rows</p>{% elif workspace.upstock_download_ready %}<p class="file-note">The current file will be prepared automatically when downloaded.</p>{% else %}<p class="file-note">Available after PRODUCT_MOVES reconciliation matches the First Scan.</p>{% endif %}
+      <div class="transfer-actions">{% if workspace.upstock_download_ready or workspace.upstock_ready %}<a class="button primary" href="{% url 'receiving:download_current_upstockserial' container.pk %}">Download file</a>{% endif %}{% if workspace.upstock_transfer.can_copy %}<a class="button secondary" href="{% url 'receiving:transfer_upstockserial' container.pk %}">Copy to Translogic</a>{% else %}<button class="button secondary" type="button" disabled>Copy to Translogic</button>{% endif %}</div>
+      {% if workspace.upstock_transfer.reason %}<p class="file-note">{{ workspace.upstock_transfer.reason }}</p>{% endif %}
+      {% if workspace.upstock_transfer.last_transfer %}<p class="file-fact">Last copy: {{ workspace.upstock_transfer.last_transfer.timestamp_dt|date:"d/m/Y H:i:s" }} · {{ workspace.upstock_transfer.last_transfer.destination }} · verified.</p>{% endif %}
+    </article>
+
+    <article class="workflow-file-card">
+      <div class="file-card-head"><div><span class="file-icon green">XLSX</span><strong>Customer report</strong></div><span class="file-state {% if workspace.report_download_ready or workspace.report_ready %}ok{% else %}pending{% endif %}">{% if workspace.report_download_ready or workspace.report_ready %}Ready to download{% else %}Waiting{% endif %}</span></div>
+      <dl class="file-paths"><dt>Working folder</dt><dd>{{ workspace.paths.report_working }}</dd><dt>Final destination</dt><dd>{% if workspace.paths.report_final %}{{ workspace.paths.report_final }}{% else %}Not configured yet — review before sending to client{% endif %}</dd></dl>
+      <p class="file-time-line"><b>Generated:</b> {% if workspace.latest_report %}{{ workspace.latest_report.generated_at|date:"d/m/Y H:i:s" }}{% else %}Not generated yet{% endif %} · <b>Uploaded:</b> — (generated by PON)</p>
+      {% if workspace.report_ready %}<p class="file-fact">Download name: {{ container.identifier }} Advised.xls</p>{% elif workspace.report_download_ready %}<p class="file-note">The current report will be prepared automatically when downloaded.</p>{% else %}<p class="file-note">Available after Client Manifest, First Scan and product master are ready.</p>{% endif %}
+      {% if workspace.report_download_ready or workspace.report_ready %}<a class="button primary wide-button" href="{% url 'receiving:download_current_client_report' container.pk %}">Download {{ container.identifier }} Advised.xls</a>{% endif %}
+    </article>
+  </div>
+</section>
+
+<details class="workflow-advanced card">
+  <summary>Advanced options</summary>
+  <div class="advanced-links"><a href="{% url 'receiving:edit_container' container.pk %}">Edit container</a><a href="{% url 'receiving:comparison' container.pk %}">Expected vs Received detail</a><a href="{% url 'receiving:product_check' container.pk %}">Product detail</a><a href="{% url 'receiving:stage2' container.pk %}">Translogic detail</a></div>
+  <div class="advanced-server-files">
+    <h3>Files available on the configured server</h3>
+    <p class="muted"><code>{{ configured_root }}</code></p>
+    {% if server_available and server_files %}
+      <div class="table-wrap"><table><thead><tr><th>File</th><th>Container match</th><th>Import</th></tr></thead><tbody>{% for item in server_files %}<tr><td>{{ item.relative_path }}</td><td>{% if item.container_match %}Yes{% else %}No{% endif %}</td><td><form method="post" action="{% url 'receiving:import_server_source' container.pk %}" class="server-import">{% csrf_token %}<input type="hidden" name="relative_path" value="{{ item.relative_path }}"><select name="kind"><option value="CLIENT">Client manifest</option><option value="RECEIVED">First scan</option></select><button class="button secondary">Import copy</button></form></td></tr>{% endfor %}</tbody></table></div>
+    {% elif server_available %}<p>No Excel files were found in this folder.</p>{% else %}<p class="muted">The server folder is not visible from this execution environment. Manual upload remains available in Step 1.</p>{% endif %}
+  </div>
+</details>
+<script>
+(function () {
+  const stagePanels = Array.from(document.querySelectorAll('[data-stage-panel]'));
+  const stageSelectors = Array.from(document.querySelectorAll('[data-stage-selector]'));
+  const stepper = document.querySelector('.workflow-stepper[data-current-stage]');
+
+  stagePanels.forEach(function (stage) {
+    stage.open = true;
+    const summary = stage.querySelector(':scope > summary');
+    if (summary) {
+      summary.addEventListener('click', function (event) {
+        event.preventDefault();
+        stage.open = true;
+      });
+    }
+    stage.addEventListener('toggle', function () {
+      if (!stage.open) stage.open = true;
+    });
+  });
+
+  function selectStage(stageNumber) {
+    const selected = String(stageNumber);
+    stagePanels.forEach(function (panel) {
+      panel.hidden = panel.dataset.stagePanel !== selected;
+    });
+    stageSelectors.forEach(function (button) {
+      const isSelected = button.dataset.stageSelector === selected;
+      button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+      button.classList.toggle('is-selected', isSelected);
+    });
+  }
+
+  stageSelectors.forEach(function (button) {
+    button.addEventListener('click', function () {
+      selectStage(button.dataset.stageSelector);
+    });
+  });
+
+  document.querySelectorAll('.container-aware-file-input').forEach(function (input) {
+    input.addEventListener('change', function () {
+      const warning = input.parentElement ? input.parentElement.querySelector('.filename-container-warning') : null;
+      if (!warning) return;
+      const expected = (input.dataset.expectedContainer || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const selectedName = input.files && input.files.length ? input.files[0].name : '';
+      const normalizedName = selectedName.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      warning.hidden = !selectedName || !expected || normalizedName.includes(expected);
+    });
+  });
+
+  const initialStage = stepper ? stepper.dataset.currentStage : '1';
+  selectStage(initialStage || '1');
+})();
+</script>
+  </section>
+</div>
+{% endblock %}

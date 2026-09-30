@@ -1,0 +1,59 @@
+{% extends "receiving/base.html" %}
+{% block content %}
+<div class="title-row">
+  <div>
+    <p class="eyebrow">Translogic transfer</p>
+    <h1>{{ transfer_kind }}</h1>
+    <p>{{ container.identifier }} · {{ container.customer.code }}</p>
+  </div>
+  <a class="button secondary" href="{{ back_url }}">Back to container</a>
+</div>
+
+<section class="card transfer-confirm-card">
+  <h2>Review before copy</h2>
+  <p>No file is copied until you confirm this screen.</p>
+
+  <dl class="definition compact-definition">
+    <dt>Source file</dt><dd><strong>{{ source_name }}</strong></dd>
+    <dt>Source</dt><dd><code>{{ source_display }}</code></dd>
+    <dt>Destination file</dt><dd><strong>{{ destination_name }}</strong></dd>
+    <dt>Destination</dt><dd><code>{{ destination_display }}</code></dd>
+    <dt>Destination accessible</dt><dd><span class="text-success">Yes</span></dd>
+    <dt>Existing destination</dt><dd>{% if destination_exists %}<span class="text-warning">Yes — replacement requires this confirmation</span>{% else %}No{% endif %}</dd>
+    {% if destination_modified %}<dt>Existing file date/time</dt><dd>{{ destination_modified|date:"d/m/Y H:i:s" }}</dd>{% endif %}
+    {% if numbered_pattern %}<dt>Detected real pattern</dt><dd><code>{{ numbered_pattern }}</code></dd>{% endif %}
+  </dl>
+
+  {% if numbered_files %}
+  <h3>Existing numbered files 1–5</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>File</th><th>Date/time</th><th>Selection</th></tr></thead>
+      <tbody>
+      {% for item in numbered_files %}
+        <tr>
+          <td>{{ item.number }}</td>
+          <td><code>{{ item.name }}</code></td>
+          <td>{{ item.modified_at|date:"d/m/Y H:i:s" }}</td>
+          <td>{% if item.name == destination_name %}<strong>Oldest — will be replaced</strong>{% else %}Keep{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if destination_exists %}
+    <div class="message warning"><strong>Replacement confirmation required.</strong> The existing destination file will be replaced only after you press the confirmation button below.</div>
+  {% endif %}
+
+  <form method="post" class="transfer-confirm-actions">
+    {% csrf_token %}
+    <input type="hidden" name="confirmed" value="yes">
+    <input type="hidden" name="expected_destination_mtime" value="{{ expected_destination_mtime }}">
+    {% if target_name %}<input type="hidden" name="target_name" value="{{ target_name }}">{% endif %}
+    <button class="button primary" type="submit">{{ confirm_label }}</button>
+    <a class="button secondary" href="{{ back_url }}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

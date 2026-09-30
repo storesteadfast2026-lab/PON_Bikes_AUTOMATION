@@ -1,0 +1,152 @@
+{% extends "receiving/base.html" %}
+{% block title %}Container Processing · PON Bike Receiving{% endblock %}
+{% block body_class %}dashboard-sidebar-page{% endblock %}
+{% block content %}
+<div class="home-workspace">
+  <aside class="home-sidebar" aria-label="Recent containers">
+    <a class="button primary home-new-button" href="#new-container">+ New container</a>
+
+    {% include "receiving/_recent_containers_sidebar.html" %}
+  </aside>
+
+  <section class="home-main">
+    <header class="home-main-head">
+      <p class="eyebrow">Container processing</p>
+      <h1>Create a new container</h1>
+      <p>Start a new receiving process or select an existing container from the left.</p>
+    </header>
+
+    <section class="card home-create-panel" id="new-container">
+      <div class="home-section-title">
+        <div class="home-section-icon">▣</div>
+        <div>
+          <h2>Container information</h2>
+          <p>Enter the details used throughout the receiving and Translogic process.</p>
+        </div>
+      </div>
+
+      <form method="post" class="home-container-form">
+        {% csrf_token %}
+        <div class="home-form-grid">
+          <div class="home-field primary-identity-field">
+            <label for="{{ form.job_order.id_for_label }}">Job Order <span class="required-mark">*</span></label>
+            {{ form.job_order }}
+            {% if form.job_order.errors %}<div class="field-error">{{ form.job_order.errors }}</div>{% endif %}
+            <small>Unique Translogic Job Order. One Job Order can belong to only one container.</small>
+          </div>
+
+          <div class="home-field primary-identity-field">
+            <label for="{{ form.identifier.id_for_label }}">Container ID <span class="required-mark">*</span></label>
+            {{ form.identifier }}
+            {% if form.identifier.errors %}<div class="field-error">{{ form.identifier.errors }}</div>{% endif %}
+          </div>
+
+          <div class="home-field">
+            <label for="{{ form.customer.id_for_label }}">Customer <span class="required-mark">*</span></label>
+            {{ form.customer }}
+            {% if form.customer.errors %}<div class="field-error">{{ form.customer.errors }}</div>{% endif %}
+          </div>
+
+          <div class="home-field">
+            <label for="{{ form.container_date.id_for_label }}">Container date <span class="required-mark">*</span></label>
+            {{ form.container_date }}
+            {% if form.container_date.errors %}<div class="field-error">{{ form.container_date.errors }}</div>{% endif %}
+          </div>
+        </div>
+
+        <section class="product-master-summary" id="customer-product-master">
+          <div class="product-master-head">
+            <div class="home-section-title compact-title">
+              <div class="home-section-icon file-icon">▤</div>
+              <div>
+                <h2>Product master</h2>
+                <p>Master product file configured for the selected customer.</p>
+              </div>
+            </div>
+            <span id="master-status" class="status-pill neutral">Not configured</span>
+          </div>
+
+          <div class="product-master-grid">
+            <div class="master-detail">
+              <span>File name</span>
+              <strong id="master-file-name">Not configured</strong>
+            </div>
+            <div class="master-detail wide">
+              <span>Source location</span>
+              <code id="master-source-path">Not configured</code>
+            </div>
+            <div class="master-detail wide">
+              <span>Application path</span>
+              <code id="master-app-path">Not configured</code>
+            </div>
+            <div class="master-detail">
+              <span>Active copy</span>
+              <strong id="master-active-copy">Not loaded</strong>
+            </div>
+          </div>
+
+        </section>
+
+        <div class="home-create-actions">
+          <button class="button primary home-create-submit" type="submit">Create container</button>
+        </div>
+      </form>
+
+      <details class="master-maintenance">
+        <summary>Product master maintenance</summary>
+        <div class="master-maintenance-actions">
+          <form method="post" action="{% url 'receiving:sync_product_catalog' %}" id="sync-catalog-form">
+            {% csrf_token %}
+            <input type="hidden" name="customer_id" id="sync-customer-id">
+            <button type="submit" class="button secondary compact" id="sync-catalog-button">Synchronize product master</button>
+          </form>
+          <form method="post" enctype="multipart/form-data" action="{% url 'receiving:upload_product_catalog' %}" class="catalog-upload compact-upload">
+            {% csrf_token %}
+            <input type="hidden" name="customer_id" id="upload-customer-id">
+            {{ catalog_form.file }}
+            <button type="submit" class="button secondary compact">Upload .xls</button>
+          </form>
+          {% if user.is_staff %}<a class="button secondary compact" href="/admin/receiving/customer/">Customer configuration</a>{% endif %}
+        </div>
+      </details>
+    </section>
+  </section>
+</div>
+
+{{ customer_catalogs|json_script:"customer-catalog-data" }}
+<script>
+(function () {
+  const select = document.getElementById("id_customer");
+  const data = JSON.parse(document.getElementById("customer-catalog-data").textContent || "{}");
+  const fileName = document.getElementById("master-file-name");
+  const sourcePath = document.getElementById("master-source-path");
+  const appPath = document.getElementById("master-app-path");
+  const activeCopy = document.getElementById("master-active-copy");
+  const status = document.getElementById("master-status");
+  const syncId = document.getElementById("sync-customer-id");
+  const uploadId = document.getElementById("upload-customer-id");
+  const syncButton = document.getElementById("sync-catalog-button");
+
+  function renderCustomerMaster() {
+    const item = data[String(select.value)] || {};
+    fileName.textContent = item.filename || "Not configured";
+    sourcePath.textContent = item.source_path || "Not configured";
+    appPath.textContent = item.app_path || "Not configured";
+    activeCopy.textContent = item.active_name
+      ? `${item.active_name} · ${item.active_rows} rows · ${item.active_loaded}`
+      : "Not loaded";
+    status.textContent = item.available ? "Available" : "Unavailable";
+    status.className = `status-pill ${item.available ? "ready" : "warning"}`;
+    syncId.value = select.value || "";
+    uploadId.value = select.value || "";
+    syncButton.disabled = !item.available;
+  }
+
+  if (select) {
+    select.addEventListener("change", renderCustomerMaster);
+    renderCustomerMaster();
+  }
+
+})();
+</script>
+{% endblock %}

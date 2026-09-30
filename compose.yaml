@@ -1,0 +1,77 @@
+name: ${COMPOSE_PROJECT_NAME:-pon_bike_automation_09161055}
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pon_bikes}
+      POSTGRES_USER: ${POSTGRES_USER:-pon_bikes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pon_bikes}
+    volumes:
+      - pon_bike_db:/var/lib/postgresql/data
+    networks:
+      - pon_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pon_bikes} -d ${POSTGRES_DB:-pon_bikes}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      PON_CONTAINER_ROOT: /data/pon_containers
+      PON_PRODUCT_CATALOG_PATH: /data/pon_products/products_pon_pbp_auto.xls
+      PON_PRODUCT_MOVES_PATH: /data/pon_translogic/PRODUCT_MOVES.CSV
+      PON_UPSTOCKSERIAL_PATH: /data/pon_import/UPStockSerial.csv
+      PON_CLIENT_REPORT_DIR: /data/pon_reports
+      PON_TRANSLOGIC_IMPORT_DIRECT_ENABLED: ${PON_TRANSLOGIC_IMPORT_DIRECT_ENABLED:-0}
+      PON_TRANSLOGIC_IMPORT_DIRECT_PATH: /data/translogic_import_direct
+      PON_PRODUCT_MOVES_DIRECT_ENABLED: ${PON_PRODUCT_MOVES_DIRECT_ENABLED:-0}
+      PON_PRODUCT_MOVES_DIRECT_PATH: /data/translogic_moves_direct/PRODUCT_MOVES.CSV
+    ports:
+      - "${PON_WEB_PORT:-8001}:8000"
+    volumes:
+      - pon_bike_media:/app/media
+      - type: bind
+        source: ${PON_HOST_PATH:-./sample_server_data}
+        target: /data/pon_containers
+        read_only: true
+      - type: bind
+        source: ${PON_PRODUCT_HOST_DIR:-./sample_product_data}
+        target: /data/pon_products
+        read_only: true
+      - type: bind
+        source: ${PON_MOVES_HOST_DIR:-./sample_translogic_data}
+        target: /data/pon_translogic
+        read_only: true
+      - type: bind
+        source: ${PON_IMPORT_HOST_DIR:-./sample_import_data}
+        target: /data/pon_import
+      - type: bind
+        source: ${PON_REPORT_HOST_DIR:-./sample_report_data}
+        target: /data/pon_reports
+      - type: bind
+        source: ${PON_TRANSLOGIC_IMPORT_HOST_DIR:-./sample_translogic_import_direct}
+        target: /data/translogic_import_direct
+      - type: bind
+        source: ${PON_PRODUCT_MOVES_DIRECT_HOST_DIR:-./sample_translogic_moves_direct}
+        target: /data/translogic_moves_direct
+        read_only: true
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - pon_internal
+
+volumes:
+  pon_bike_db:
+  pon_bike_media:
+
+networks:
+  pon_internal:
+    driver: bridge

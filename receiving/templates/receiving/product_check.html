@@ -1,0 +1,258 @@
+{% extends "receiving/base.html" %}
+{% block title %}Product check · {{ container.identifier }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'receiving:container_detail' container.pk %}">← Back to {{ container.identifier }}</a></p>
+
+<div class="title-row">
+  <div>
+    <p class="eyebrow">Translogic product catalogue comparison</p>
+    <h1>{{ container.identifier }}</h1>
+    {% if catalog %}<p>Compared with {{ catalog.original_name }} · {{ catalog.row_count }} catalogue rows</p>{% endif %}
+  </div>
+  {% if catalog and received_batch %}
+    <div class="actions">
+      <a class="button secondary" href="{% url 'receiving:export_product_check' container.pk %}">Download Product check + barcodes (.xlsx)</a>
+      <a class="button primary" href="{% url 'receiving:export_new_products' container.pk %}">Download New Product Import</a>
+    </div>
+  {% endif %}
+</div>
+
+{% if not catalog %}
+  <div class="message warning">Synchronize <strong>products_pon_pbp_auto.xls</strong> from the dashboard before checking products.</div>
+{% endif %}
+{% if not received_batch %}
+  <div class="message warning">Confirm the first-scan / received-bike file for this container before checking products.</div>
+{% endif %}
+
+<div class="metrics product-metrics">
+  <div class="metric"><span>Total units</span><strong>{{ summary.total_units }}</strong></div>
+  <div class="metric status-match"><span>Existing product rows</span><strong>{{ summary.existing_rows }}</strong></div>
+  <div class="metric status-migration"><span>PBP → PON rows</span><strong>{{ summary.pbp_to_pon_rows }}</strong></div>
+  <div class="metric status-unexpected"><span>New product rows</span><strong>{{ summary.new_rows }}</strong></div>
+  <div class="metric status-unexpected"><span>New units</span><strong>{{ summary.new_units }}</strong></div>
+</div>
+
+{% if product_forms %}
+<section class="card new-product-entry" id="new-product-data">
+  <div class="table-heading new-product-heading">
+    <div>
+      <h2>Product data for Translogic</h2>
+      <p class="muted">Enter Length, Height and Width in centimetres only for products that still require manual Translogic data. PBP → PON products reuse valid historical Translogic dimensions and weight automatically. Django stores manually entered dimensions in millimetres. Group1 is always resolved through the current PON family mapping; the historical PBP Group1 is never copied directly. Group2 follows the existing cubic rule.</p>
+      <p class="muted">Current product-master dictionary: <strong>{{ name_dictionary_exact_count }}</strong> reliable historical name matches and <strong>{{ name_dictionary_rule_count }}</strong> learned abbreviation rules.</p>
+      <p><strong>{{ saved_definition_count }} saved</strong> · <strong>{{ pending_definition_count }} pending</strong>. All four numeric fields are required before the data can be saved. Use <strong>Tab</strong> to move across the row; when a blank row is reached, the closest complete measurements above are proposed automatically.</p>
+    </div>
+    <div class="suggestion-key" aria-label="Suggested value colour key">
+      <span><i class="key-chip suggested"></i> Proposed from previous row</span>
+      <span><i class="key-chip changed"></i> Changed from proposal</span>
+    </div>
+  </div>
+
+  {% if unresolved_group1_count %}
+    <div class="message warning group1-warning"><strong>{{ unresolved_group1_count }} product(s) need a Group1 decision.</strong> No clear family relation was found. Add or adjust it in <a href="/admin/receiving/group1family/" target="_blank" rel="noopener">Administration → Group1 family mappings</a>, then reload this page. Saving/exporting remains blocked until the relation is clear.</div>
+  {% endif %}
+
+  <form method="post" id="new-product-form">
+    {% csrf_token %}
+    <div class="new-product-grid new-product-grid-header" aria-hidden="true">
+      <div>Long code</div>
+      <div>Short name (max 30)</div>
+      <div>Length cm</div>
+      <div>Height cm</div>
+      <div>Width cm</div>
+      <div>Weight kg</div>
+    </div>
+
+    <div class="new-product-rows">
+      {% for item in product_forms %}
+      <div class="new-product-row" data-saved="{% if item.saved %}1{% else %}0{% endif %}" data-product-code="{{ item.row.code }}">
+        <div class="product-code-line">
+          <code>{{ item.row.code }}</code>
+          <span class="badge {% if item.saved %}badge-existing{% else %}badge-new{% endif %}">{% if item.saved %}Saved{% else %}Pending{% endif %}</span>
+        </div>
+
+        <div class="new-product-grid new-product-primary-line">
+          <div class="compact-input-cell">
+            <label class="compact-field-label" for="{{ item.form.long_code.id_for_label }}">Long code</label>
+            {{ item.form.long_code }}
+            {{ item.form.long_code.errors }}
+          </div>
+
+          <div class="compact-input-cell product-short-name-cell">
+            <label class="compact-field-label" for="{{ item.form.short_name.id_for_label }}">Short name (max 30)</label>
+            {{ item.form.short_name }}
+            <small class="name-counter" data-for="{{ item.form.short_name.id_for_label }}"></small>
+            {{ item.form.short_name.errors }}
+          </div>
+
+          <div class="compact-input-cell measure-cell" data-label="Length cm">
+            <label class="compact-field-label" for="{{ item.form.length_cm.id_for_label }}">Length cm</label>
+            {{ item.form.length_cm }}
+            {{ item.form.length_cm.errors }}
+          </div>
+          <div class="compact-input-cell measure-cell" data-label="Height cm">
+            <label class="compact-field-label" for="{{ item.form.height_cm.id_for_label }}">Height cm</label>
+            {{ item.form.height_cm }}
+            {{ item.form.height_cm.errors }}
+          </div>
+          <div class="compact-input-cell measure-cell" data-label="Width cm">
+            <label class="compact-field-label" for="{{ item.form.width_cm.id_for_label }}">Width cm</label>
+            {{ item.form.width_cm }}
+            {{ item.form.width_cm.errors }}
+          </div>
+          <div class="compact-input-cell measure-cell" data-label="Weight kg">
+            <label class="compact-field-label" for="{{ item.form.weight_kg.id_for_label }}">Weight kg</label>
+            {{ item.form.weight_kg }}
+            {{ item.form.weight_kg.errors }}
+          </div>
+        </div>
+
+        <div class="new-product-grid new-product-secondary-line">
+          <div class="group1-assignment {% if item.group1 %}resolved{% else %}unresolved{% endif %}">
+            <span>Group1</span>
+            {% if item.group1 %}
+              <strong>{{ item.group1 }}</strong>
+              <small>{{ item.group1_family }}</small>
+            {% else %}
+              <strong>Needs decision</strong>
+              <small>{{ item.group1_resolution.message }}</small>
+            {% endif %}
+          </div>
+
+          <div class="compact-input-cell product-long-name-cell">
+            <label class="compact-field-label" for="{{ item.form.full_name.id_for_label }}">Long name</label>
+            {{ item.form.full_name }}
+            {{ item.form.full_name.errors }}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <p class="save-note">Values are stored only when you press the button below. There is no per-row confirmation step.</p>
+    <div class="form-actions"><button class="button primary" type="submit">Save product data</button></div>
+  </form>
+</section>
+{% endif %}
+
+<section class="card product-classification-card">
+  <div class="table-heading">
+    <div>
+      <h2>Product classification</h2>
+      <p class="muted">For PON receiving, an exact PON match is <strong>Existing</strong>. If no PON record exists but an exact PBP record exists, the item is <strong>PBP → PON</strong>. If neither exists, it remains <strong>New</strong>. Exact matching uses <code>code</code>, <code>pon_sku</code> and <code>code2</code>; partial matches are never accepted.</p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Code</th><th>Long_Code</th><th>Count</th><th>LOC</th><th>Status</th><th>TL Code</th><th>TL short name</th><th>TL long name</th><th>Group1</th><th>Group2</th><th>Matched by</th></tr></thead>
+      <tbody>
+      {% for row in rows %}
+        <tr class="{% if row.is_new %}status-unexpected{% elif row.is_pbp_to_pon %}status-migration{% else %}status-match{% endif %}">
+          <td><code>{{ row.code }}</code></td>
+          <td>{{ row.long_code|default:"—" }}</td>
+          <td>{{ row.count }}</td>
+          <td>{{ row.location|default:"—" }}</td>
+          <td><span class="badge {% if row.is_new %}badge-new{% elif row.is_pbp_to_pon %}badge-migration{% else %}badge-existing{% endif %}">{{ row.status }}</span></td>
+          <td>{{ row.tl_code|default:"—" }}</td>
+          <td>{{ row.catalog_short_name|default:"—" }}</td>
+          <td>{{ row.catalog_long_name|default:"—" }}</td>
+          <td>{{ row.catalog_group1|default:"—" }}</td>
+          <td>{{ row.catalog_group2|default:"—" }}</td>
+          <td>{{ row.matched_by|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="11">No product comparison is available yet.</td></tr>
+      {% endfor %}
+      </tbody>
+      {% if rows %}<tfoot><tr><th>Total</th><th></th><th>{{ summary.total_units }}</th><th colspan="8"></th></tr></tfoot>{% endif %}
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Export configuration</h2>
+  <p>Translogic import format: <strong>{{ export_configuration.TL_EXPORT_FORMAT }}</strong>. Fixed values and this import format can be changed in <a href="/admin/receiving/appsetting/">Administration → App settings</a>. Group1 family/suffix relationships are managed separately in <a href="/admin/receiving/group1family/">Administration → Group1 family mappings</a>.</p>
+  <p class="muted">New Product Import includes both <strong>New</strong> products and <strong>PBP → PON</strong> migrations that must be created under PON in Translogic. PBP → PON is not counted or reported as New. Product check + printable barcodes downloads as .xlsx so the embedded Code 128 images remain visible when opened and printed in Microsoft Excel.</p>
+</section>
+
+{% if generated_exports %}
+<section class="card">
+  <h2>Previous downloaded copies</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>Type</th><th>File</th><th>Rows</th><th>Format</th></tr></thead>
+    <tbody>{% for export in generated_exports %}<tr><td>{{ export.generated_at }}</td><td>{{ export.get_kind_display }}</td><td><a href="{{ export.file.url }}">{{ export.original_name }}</a></td><td>{{ export.row_count }}</td><td>{{ export.file_format }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endif %}
+
+<script>
+(function () {
+  const rows = Array.from(document.querySelectorAll('.new-product-row'));
+  const measureOrder = ['length', 'height', 'width', 'weight'];
+
+  function rowInputs(row) {
+    return measureOrder.map(function (name) {
+      return row.querySelector('[data-measure="' + name + '"]');
+    });
+  }
+
+  function rowValues(row) {
+    const inputs = rowInputs(row);
+    if (inputs.some(function (input) { return !input || input.value.trim() === ''; })) return null;
+    return inputs.map(function (input) { return input.value; });
+  }
+
+  function previousCompleteValues(index) {
+    for (let i = index - 1; i >= 0; i -= 1) {
+      const values = rowValues(rows[i]);
+      if (values) return values;
+    }
+    return null;
+  }
+
+  function proposeFromPrevious(row, index) {
+    if (row.dataset.saved === '1') return;
+    const inputs = rowInputs(row);
+    if (inputs.some(function (input) { return !input; })) return;
+    if (inputs.some(function (input) { return input.value.trim() !== ''; })) return;
+
+    const proposal = previousCompleteValues(index);
+    if (!proposal) return;
+
+    inputs.forEach(function (input, position) {
+      input.value = proposal[position];
+      input.dataset.proposedValue = proposal[position];
+      input.classList.add('suggested-value');
+      input.classList.remove('changed-value');
+    });
+  }
+
+  rows.forEach(function (row, index) {
+    const inputs = rowInputs(row);
+    inputs.forEach(function (input) {
+      if (!input) return;
+      input.addEventListener('focus', function () {
+        proposeFromPrevious(row, index);
+      });
+      input.addEventListener('input', function () {
+        if (!Object.prototype.hasOwnProperty.call(input.dataset, 'proposedValue')) return;
+        const changed = input.value !== input.dataset.proposedValue;
+        input.classList.toggle('changed-value', changed);
+        input.classList.toggle('suggested-value', !changed);
+      });
+    });
+  });
+
+  document.querySelectorAll('.name-counter').forEach(function (counter) {
+    const input = document.getElementById(counter.dataset.for);
+    if (!input) return;
+    const update = function () {
+      const length = input.value.length;
+      counter.textContent = length + '/30';
+      counter.classList.toggle('over-limit', length > 30);
+    };
+    input.addEventListener('input', update);
+    update();
+  });
+})();
+</script>
+{% endblock %}

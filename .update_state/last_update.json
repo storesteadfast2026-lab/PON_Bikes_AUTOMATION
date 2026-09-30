@@ -1,0 +1,12 @@
+﻿{
+    "release_version":  "1001.0832",
+    "prepared_at":  "2026-10-01T08:36:26.7143105+09:30",
+    "target_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation",
+    "previous_install_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_083624_before_1001.0832",
+    "database_backup":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_083624_before_1001.0832\\database_before_update.sql",
+    "first_stable_install":  false,
+    "git_existed_before":  false,
+    "status":  "applied",
+    "applied_at":  "2026-10-01T08:36:46.1887475+09:30"
+}

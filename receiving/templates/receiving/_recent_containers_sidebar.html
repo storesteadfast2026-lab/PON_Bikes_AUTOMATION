@@ -1,0 +1,67 @@
+<div class="home-search-wrap">
+  <label class="sr-only" for="container-search">Search containers</label>
+  <input id="container-search" class="home-search" type="search" placeholder="Search containers..." autocomplete="off">
+</div>
+
+<div class="home-sidebar-heading">
+  <h2>Recent containers</h2>
+  <span>{{ recent_rows|length }}</span>
+</div>
+
+<div class="recent-container-list" id="recent-container-list">
+  {% for row in recent_rows %}
+  {% with row_container=row.container %}
+  <a
+    class="recent-container-item {% if row_container.status == 'PENDING' %}pending-container{% endif %}{% if active_container_id == row_container.pk %} current-container{% endif %}"
+    href="{% url 'receiving:container_detail' row_container.pk %}"
+    data-container-search="{{ row_container.job_order }} {{ row_container.identifier }} {{ row_container.customer.code }} {{ row_container.customer.name }} {{ row_container.get_status_display }}"
+    {% if active_container_id == row_container.pk %}aria-current="page"{% endif %}
+  >
+    <div class="recent-job-order">
+      <span>JOB ORDER</span>
+      <strong>{% if row_container.job_order %}{{ row_container.job_order }}{% else %}Not assigned{% endif %}</strong>
+    </div>
+    <div class="recent-container-topline">
+      <strong>{{ row_container.identifier }}</strong>
+      <span class="status-pill {% if row_container.status == 'CLOSED' or row_container.status == 'READY' %}ready{% elif row_container.status == 'PENDING' %}warning{% else %}working{% endif %}">
+        {{ row_container.get_status_display }}
+      </span>
+    </div>
+    <div class="recent-container-meta">
+      <span>{{ row_container.customer.code }}</span>
+      {% if row.manifest_uploaded %}<span>Manifest uploaded ✓</span>{% endif %}
+      {% if active_container_id == row_container.pk %}<span class="current-container-label">Current</span>{% endif %}
+    </div>
+    {% if row.manifest_uploaded %}<small>{{ row.advised }} advised</small>{% elif row_container.container_date %}<small>{{ row_container.container_date|date:"d M Y" }}</small>{% else %}<small>No manifest yet</small>{% endif %}
+  </a>
+  {% endwith %}
+  {% empty %}
+  <div class="empty-recent">No containers yet.</div>
+  {% endfor %}
+  <div class="empty-search-result" id="empty-search-result" hidden>No matching containers.</div>
+</div>
+
+<div class="home-sidebar-footer">
+  <strong>Receiving workspace</strong>
+  <span>Select a container to continue exactly where you left it.</span>
+</div>
+
+<script>
+(function () {
+  const search = document.getElementById("container-search");
+  const items = Array.from(document.querySelectorAll(".recent-container-item"));
+  const emptySearch = document.getElementById("empty-search-result");
+  if (!search) return;
+  search.addEventListener("input", function () {
+    const needle = search.value.trim().toLowerCase();
+    let visible = 0;
+    items.forEach(function (item) {
+      const haystack = (item.dataset.containerSearch || "").toLowerCase();
+      const show = !needle || haystack.includes(needle);
+      item.hidden = !show;
+      if (show) visible += 1;
+    });
+    if (emptySearch) emptySearch.hidden = visible !== 0 || !needle;
+  });
+})();
+</script>

@@ -1,0 +1,59 @@
+{% extends "receiving/base.html" %}
+{% block title %}Log in · PON Bike Receiving{% endblock %}
+{% block body_class %}login-page{% endblock %}
+{% block content %}
+<section class="login-shell">
+  <div class="login-visual">
+    <div class="login-visual-content">
+      <span class="login-kicker">Warehouse operations</span>
+      <h1>One controlled process for every bike container.</h1>
+      <p>Import, validate and compare PON receiving files before information moves to Translogic.</p>
+      <ul class="login-features">
+        <li><span>01</span>Controlled Excel imports</li>
+        <li><span>02</span>Expected versus received comparison</li>
+        <li><span>03</span>Traceable container history</li>
+      </ul>
+    </div>
+    <div class="login-grid" aria-hidden="true"></div>
+  </div>
+
+  <div class="login-panel">
+    <div class="login-panel-inner">
+      <div class="mobile-brand">
+        <span class="brand-mark" aria-hidden="true">PB</span>
+        <span><strong>PON Bike</strong><small>Receiving Automation</small></span>
+      </div>
+      <span class="eyebrow">Secure access</span>
+      <h2>Welcome back</h2>
+      <p class="login-intro">Sign in with your internal account to manage container files.</p>
+
+      {% if form.errors %}
+        <div class="form-alert" role="alert">
+          The username or password is incorrect. Please try again.
+        </div>
+      {% endif %}
+
+      <form method="post" class="login-form">
+        {% csrf_token %}
+        {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+
+        <div class="field-group">
+          <label for="{{ form.username.id_for_label }}">Username</label>
+          {{ form.username }}
+        </div>
+
+        <div class="field-group">
+          <label for="{{ form.password.id_for_label }}">Password</label>
+          {{ form.password }}
+        </div>
+
+        <button class="button primary login-submit" type="submit">
+          <span>Log in</span><span aria-hidden="true">→</span>
+        </button>
+      </form>
+
+      <p class="login-help">Access is restricted to authorised warehouse personnel.</p>
+    </div>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,250 @@
+{% extends "receiving/base.html" %}
+{% block title %}Configure import · {{ source.container.identifier }}{% endblock %}
+{% block body_class %}wide-workflow-page{% endblock %}
+{% block content %}
+
+<div class="app-page-head">
+  <div>
+    <a class="app-back-link" href="{% url 'receiving:container_detail' source.container_id %}">← Back to {{ source.container.identifier }}</a>
+    <p class="eyebrow">{{ source.get_kind_display }}</p>
+    <h1>Review detected mapping</h1>
+    <p class="app-page-subtitle">{{ source.original_name }}</p>
+  </div>
+  <span class="app-context-chip">{{ source.container.customer.code }} · {{ source.container.identifier }}</span>
+</div>
+
+<nav class="app-stepper" aria-label="Import workflow">
+  <div class="app-step complete">
+    <span class="app-step-number">✓</span>
+    <div><strong>Upload file</strong><small>Excel file selected</small></div>
+  </div>
+  <div class="app-step current">
+    <span class="app-step-number">2</span>
+    <div><strong>Review mapping</strong><small>Auto-detected worksheet and columns</small></div>
+  </div>
+  <div class="app-step pending">
+    <span class="app-step-number">3</span>
+    <div><strong>Validate preview</strong><small>Review detected data</small></div>
+  </div>
+  <div class="app-step pending">
+    <span class="app-step-number">4</span>
+    <div><strong>Confirm import</strong><small>Accept and continue</small></div>
+  </div>
+</nav>
+
+<form method="post" class="import-config-form" id="import-config-form">
+  {% csrf_token %}
+  {% if form.non_field_errors %}<div class="message error">{{ form.non_field_errors }}</div>{% endif %}
+
+  <div class="import-config-grid">
+    <aside class="app-panel mapping-panel">
+      <div class="app-panel-head">
+        <div>
+          <h2>Mapping detected</h2>
+          <p>PON.BIKE analysed the workbook and proposed the most likely fields. Change only fields that need correction.</p>
+        </div>
+      </div>
+
+      {% if mapping_analysis.profile_match %}
+      <div class="preview-status success">
+        <span class="preview-status-icon">✓</span>
+        <div><strong>Saved mapping recognised</strong><small>{{ mapping_analysis.profile_match }} matches this workbook structure.</small></div>
+      </div>
+      {% endif %}
+
+      <div class="app-field-stack">
+        <div class="app-field">
+          <label for="{{ form.sheet_name.id_for_label }}">Worksheet</label>
+          {{ form.sheet_name }}
+          {% if form.sheet_name.errors %}<div class="field-error">{{ form.sheet_name.errors }}</div>{% endif %}
+        </div>
+
+        <div class="app-field">
+          <label for="{{ form.start_row.id_for_label }}">First data row</label>
+          {{ form.start_row }}
+          <small>Row number where bike data starts.</small>
+          {% if form.start_row.errors %}<div class="field-error">{{ form.start_row.errors }}</div>{% endif %}
+        </div>
+
+        <div class="app-field">
+          <label for="{{ form.row_step.id_for_label }}">Read every N rows</label>
+          {{ form.row_step }}
+          <small>Use 1 for every row, or a higher value for spaced rows.</small>
+          {% if form.row_step.errors %}<div class="field-error">{{ form.row_step.errors }}</div>{% endif %}
+        </div>
+
+        <div class="mapping-divider"></div>
+
+        <div class="app-field">
+          <label for="{{ form.code_column.id_for_label }}">Bike code column <span class="mapping-confidence {% if mapping_analysis.confidence.code_column >= 95 %}high{% elif mapping_analysis.confidence.code_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.code_column }}%</span></label>
+          {{ form.code_column }}
+          <small>Detected: {{ mapping_analysis.field_labels.code_column }} · Column containing the bike / SKU code.</small>
+          {% if form.code_column.errors %}<div class="field-error">{{ form.code_column.errors }}</div>{% endif %}
+        </div>
+
+        <div class="app-field">
+          <label for="{{ form.long_code_column.id_for_label }}">LongCode column <span class="optional-label">Optional</span> {% if mapping_analysis.confidence.long_code_column %}<span class="mapping-confidence {% if mapping_analysis.confidence.long_code_column >= 95 %}high{% elif mapping_analysis.confidence.long_code_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.long_code_column }}%</span>{% endif %}</label>
+          {{ form.long_code_column }}
+          <small>Detected: {{ mapping_analysis.field_labels.long_code_column }}</small>
+          {% if form.long_code_column.errors %}<div class="field-error">{{ form.long_code_column.errors }}</div>{% endif %}
+        </div>
+
+        <div class="app-field">
+          <label for="{{ form.description_column.id_for_label }}">Description column <span class="mapping-confidence {% if mapping_analysis.confidence.description_column >= 95 %}high{% elif mapping_analysis.confidence.description_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.description_column }}%</span></label>
+          {{ form.description_column }}
+          <small>Detected: {{ mapping_analysis.field_labels.description_column }}</small>
+          {% if form.description_column.errors %}<div class="field-error">{{ form.description_column.errors }}</div>{% endif %}
+        </div>
+
+        <div class="app-field">
+          <label for="{{ form.quantity_column.id_for_label }}">Quantity column <span class="mapping-confidence {% if mapping_analysis.confidence.quantity_column >= 95 %}high{% elif mapping_analysis.confidence.quantity_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.quantity_column }}%</span></label>
+          {{ form.quantity_column }}
+          <small>Detected: {{ mapping_analysis.field_labels.quantity_column }}</small>
+          {% if form.quantity_column.errors %}<div class="field-error">{{ form.quantity_column.errors }}</div>{% endif %}
+        </div>
+
+        {% if source.kind == "CLIENT" %}
+        <div class="app-field">
+          <label for="{{ form.container_column.id_for_label }}">Container column <span class="mapping-confidence {% if mapping_analysis.confidence.container_column >= 95 %}high{% elif mapping_analysis.confidence.container_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.container_column }}%</span></label>
+          {{ form.container_column }}
+          <small>Detected: {{ mapping_analysis.field_labels.container_column }}. Used to split one client manifest into independent containers. Leave blank only when the workbook has no container field.</small>
+          {% if form.container_column.errors %}<div class="field-error">{{ form.container_column.errors }}</div>{% endif %}
+        </div>
+        {% endif %}
+
+        <label class="app-checkbox-row" for="{{ form.coloured_rows_only.id_for_label }}">
+          {{ form.coloured_rows_only }}
+          <span>Only rows with a coloured fill</span>
+        </label>
+
+        <div class="app-field">
+          <label for="{{ form.required_fill_signature.id_for_label }}">Required fill <span class="auto-label">Automatically detected</span></label>
+          {{ form.required_fill_signature }}
+          <small>Keep the detected value when only the highlighted client rows should be imported.</small>
+          {% if form.required_fill_signature.errors %}<div class="field-error">{{ form.required_fill_signature.errors }}</div>{% endif %}
+        </div>
+      </div>
+
+      <details class="app-advanced-box">
+        <summary>Advanced mapping options</summary>
+        <div class="app-field-stack advanced-fields">
+          <label class="app-checkbox-row" for="{{ form.location_stream.id_for_label }}">
+            {{ form.location_stream }}
+            <span>{{ form.location_stream.label }}</span>
+          </label>
+          <label class="app-checkbox-row" for="{{ form.save_profile.id_for_label }}">
+            {{ form.save_profile }}
+            <span>{{ form.save_profile.label }}</span>
+          </label>
+          <div class="app-field">
+            <label for="{{ form.profile_name.id_for_label }}">Profile name</label>
+            {{ form.profile_name }}
+            {% if form.profile_name.errors %}<div class="field-error">{{ form.profile_name.errors }}</div>{% endif %}
+          </div>
+        </div>
+      </details>
+
+      <section class="mapping-summary-card" aria-label="Column mapping summary">
+        <h3>Column mapping summary</h3>
+        <p>A quick overview of the selected columns.</p>
+        <div class="mapping-summary-list">
+          <div><span>Bike code</span><strong id="summary-code">{{ mapping_summary.code|default:"—" }}</strong></div>
+          <div><span>LongCode</span><strong id="summary-long-code">{{ mapping_summary.long_code|default:"—" }}</strong></div>
+          <div><span>Description</span><strong id="summary-description">{{ mapping_summary.description|default:"—" }}</strong></div>
+          <div><span>Quantity</span><strong id="summary-quantity">{{ mapping_summary.quantity|default:"—" }}</strong></div>
+          {% if source.kind == "CLIENT" %}<div><span>Container</span><strong id="summary-container">{{ mapping_summary.container|default:"—" }}</strong></div>{% endif %}
+        </div>
+      </section>
+    </aside>
+
+    <section class="app-panel workbook-panel">
+      <div class="app-panel-head workbook-head">
+        <div>
+          <h2>Validation preview</h2>
+          <p>Preview the workbook with the current mapping before continuing.</p>
+        </div>
+        <span class="status-pill {% if mapping_ready %}ready{% else %}warning{% endif %}">
+          {% if mapping_ready %}Mapping ready{% else %}Review mapping{% endif %}
+        </span>
+      </div>
+
+      {% if selected_sheet %}
+      <div class="app-stat-strip">
+        <div><span class="stat-label">Worksheet</span><strong>{{ selected_sheet.name }}</strong></div>
+        <div><span class="stat-label">Data rows</span><strong>{{ mapping_analysis.data_rows }}</strong></div>
+        <div><span class="stat-label">Header row</span><strong>{{ mapping_analysis.header_row }}</strong></div>
+        <div><span class="stat-label">Containers</span><strong>{{ detected_containers|length }}</strong></div>
+      </div>
+
+      <div class="preview-status {% if mapping_ready %}success{% else %}warning{% endif %}">
+        <span class="preview-status-icon">{% if mapping_ready %}✓{% else %}!{% endif %}</span>
+        <div>
+          <strong>{% if mapping_ready %}Mapping is ready to preview{% else %}Mapping needs attention{% endif %}</strong>
+          <small>{% if mapping_ready %}Continue to build the normalized import preview.{% else %}Select a worksheet, first data row and bike code column.{% endif %}</small>
+        </div>
+      </div>
+
+      {% if detected_containers %}
+      <section class="detected-container-panel">
+        <div class="app-panel-head compact-head"><div><h3>Containers detected</h3><p>Each container remains an independent receiving process.</p></div></div>
+        <div class="detected-container-list">
+          {% for item in detected_containers %}
+          <div class="detected-container-row {% if item.is_current %}current{% endif %}">
+            <div><strong>{{ item.identifier }}</strong><small>{% if item.is_current %}Current container{% elif item.will_create %}Will be created as PENDING{% elif item.exists %}Existing container — manifest data will be linked{% endif %}</small></div>
+            <div><span>{{ item.rows }} rows</span><strong>{{ item.units }} advised</strong></div>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      <div class="workbook-preview-wrap">
+        <table class="app-data-table workbook-preview-table">
+          <tbody>
+            {% for row in selected_sheet.preview %}
+              <tr class="{% if forloop.first %}preview-header-row{% endif %}">
+                <th>{{ row.row }}</th>
+                {% for value in row.values %}<td title="{{ value }}">{{ value|truncatechars:38 }}</td>{% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="preview-note">
+        Showing the first {{ selected_sheet.preview|length }} non-empty rows. The selected worksheet contains {{ mapping_analysis.data_rows }} detected data rows. Low-confidence fields are never forced automatically.
+      </div>
+      {% else %}
+        <div class="empty-state">No worksheet data is available for preview.</div>
+      {% endif %}
+    </section>
+  </div>
+
+  <div class="app-actionbar">
+    <a class="button secondary" href="{% url 'receiving:container_detail' source.container_id %}">Cancel</a>
+    <div class="app-actionbar-primary">
+      <button class="button primary" type="submit">Continue to preview →</button>
+    </div>
+  </div>
+</form>
+
+<script>
+(function () {
+  const map = {
+    id_code_column: "summary-code",
+    id_long_code_column: "summary-long-code",
+    id_description_column: "summary-description",
+    id_quantity_column: "summary-quantity",
+    id_container_column: "summary-container"
+  };
+  Object.entries(map).forEach(([inputId, outputId]) => {
+    const input = document.getElementById(inputId);
+    const output = document.getElementById(outputId);
+    if (!input || !output) return;
+    const update = () => { output.textContent = (input.value || "—").trim().toUpperCase() || "—"; };
+    input.addEventListener("input", update);
+    update();
+  });
+})();
+</script>
+{% endblock %}
