@@ -29,42 +29,39 @@ if (-not $backupDir -or -not (Test-Path -LiteralPath $backupDir)) {
     throw 'No rollback snapshot was found.'
 }
 
-$appBackup = Join-Path $backupDir 'app'
+Assert-PonStableTarget -TargetDir $TargetDir
+Get-PonPreUpdateCommit -TargetDir $TargetDir | Out-Null
+$commitPath = Join-Path $backupDir 'PRE_UPDATE_COMMIT.txt'
+$filesPath = Join-Path $backupDir 'UPDATE_FILES.txt'
 $dbBackup = Join-Path $backupDir 'database_before_update.sql'
-if (-not (Test-Path -LiteralPath $appBackup)) { throw "Application backup not found: $appBackup" }
-
-Write-Host "Rollback snapshot: $backupDir" -ForegroundColor Yellow
-Write-Host 'This will restore the previous application files and database snapshot.' -ForegroundColor Yellow
+if (-not (Test-Path -LiteralPath $commitPath) -or -not (Test-Path -LiteralPath $filesPath)) { throw 'Git rollback metadata is missing. No files changed.' }
+$preCommit = (Get-Content -LiteralPath $commitPath -Raw).Trim()
+if ($preCommit -notmatch '^[a-fA-F0-9]{40,64}$') { throw 'Invalid pre-update commit.' }
+& git -C $TargetDir cat-file -e "${preCommit}^{commit}"
+if ($LASTEXITCODE -ne 0) { throw 'Pre-update commit is inaccessible. No files changed.' }
+$updateFiles = @(Get-Content -LiteralPath $filesPath | Where-Object { $_.Trim() })
+if ($updateFiles.Count -eq 0) { throw 'Rollback file list is empty.' }
+foreach ($relative in $updateFiles) {
+    if ($relative -match '(^[\\/]|:|(^|[\\/])\.\.([\\/]|$)|(^|[\\/])\.git([\\/]|$))') { throw 'Unsafe rollback path.' }
+}
+if (-not (Test-Path -LiteralPath $dbBackup) -or (Get-Item -LiteralPath $dbBackup).Length -eq 0) { throw 'PostgreSQL backup is missing or empty.' }
+Write-Host "Pre-update commit: $preCommit" -ForegroundColor Yellow
+Write-Host 'Rollback restores the update files from Git and the previous PostgreSQL snapshot.' -ForegroundColor Yellow
 if (-not $Force) {
     $answer = Read-Host 'Type ROLLBACK to continue'
-    if ($answer -ne 'ROLLBACK') {
-        Write-Host 'Rollback cancelled.' -ForegroundColor Cyan
-        exit 0
-    }
+    if ($answer -ne 'ROLLBACK') { Write-Host 'Rollback cancelled.'; exit 0 }
 }
-
-if (Test-Path -LiteralPath (Join-Path $TargetDir 'compose.yaml')) {
-    Push-Location $TargetDir
-    try { & docker compose stop web | Out-Host } finally { Pop-Location }
-}
-
-if (Test-Path -LiteralPath (Join-Path $backupDir 'GIT_EXISTED.txt')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $TargetDir '.git'))) { throw 'Existing Git repository is missing; rollback will not recreate it.' }
-    & git -C $TargetDir status
-    if ($LASTEXITCODE -ne 0) { throw 'Existing Git repository is inaccessible; rollback stopped.' }
-}
-
-Write-Host 'Restoring previous application files...' -ForegroundColor Cyan
-if (-not (Test-Path -LiteralPath $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
-Clear-PonDirectory -Path $TargetDir
-Copy-PonTree -Source $appBackup -Destination $TargetDir
-
-if (Test-Path -LiteralPath $dbBackup) {
-    Write-Host 'Restoring previous PostgreSQL snapshot...' -ForegroundColor Cyan
-    Restore-PonDatabase -InstallDir $TargetDir -InputFile $dbBackup
-} else {
-    Write-PonWarn 'No database snapshot exists; only application files will be restored.'
-}
+Push-Location $TargetDir
+try {
+    & docker compose stop web
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stop web before rollback.' }
+} finally { Pop-Location }
+& git -C $TargetDir restore --source=$preCommit --staged --worktree -- @updateFiles
+if ($LASTEXITCODE -ne 0) { throw 'Git code restore failed.' }
+$envBackup = Join-Path $backupDir '.env'
+if (Test-Path -LiteralPath $envBackup) { Copy-Item -LiteralPath $envBackup -Destination (Join-Path $TargetDir '.env') -Force }
+Restore-PonDatabase -InstallDir $TargetDir -InputFile $dbBackup
+Get-PonPreUpdateCommit -TargetDir $TargetDir | Out-Null
 
 Push-Location $TargetDir
 try {

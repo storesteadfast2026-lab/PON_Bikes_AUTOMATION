@@ -905,6 +905,78 @@ class PbpToPonMigrationTests(TestCase):
         self.assertTrue(_original_import_rows(self.container, rows)[0]["is_pbp_to_pon"])
         self.assertFalse(_original_import_rows(other, rows)[0]["is_pbp_to_pon"])
 
+    def test_container_get_uses_persisted_state_without_catalog_work_or_writes(self):
+        from receiving.views import _product_check_data
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        _product_check_data(self.container)
+        with patch("receiving.views.compare_products_to_catalog", side_effect=AssertionError("classification in GET")), \
+             patch("receiving.views.parse_product_catalog", side_effect=AssertionError("master parse in GET")), \
+             patch("receiving.views._product_check_data", side_effect=AssertionError("heavy read in GET")), \
+             patch("receiving.views.build_new_product_workbook", side_effect=AssertionError("export in GET")), \
+             CaptureQueriesContext(connection) as queries:
+            for _ in range(2):
+                response = self.client.get(reverse("receiving:container_detail", args=[self.container.pk]))
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.context["workspace"]["new_product_import_download_ready"])
+        for query in queries:
+            sql = query["sql"].lower()
+            self.assertNotIn("receiving_productcatalogentry", sql)
+            self.assertFalse(sql.lstrip().startswith(("insert", "update", "delete")))
+
+    def test_legacy_container_get_does_not_rebuild_history(self):
+        from receiving.models import ContainerProductStatus
+        state = ContainerProductStatus.objects.create(container=self.container, code=self.SKU, was_new=False)
+        with patch("receiving.views.compare_products_to_catalog", side_effect=AssertionError("legacy recovery in GET")), \
+             patch("receiving.views.parse_product_catalog", side_effect=AssertionError("legacy parse in GET")):
+            response = self.client.get(reverse("receiving:container_detail", args=[self.container.pk]))
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.context["workspace"]["products_ready"])
+        state.refresh_from_db()
+        self.assertEqual(state.import_classification, "")
+        self.assertEqual(state.import_history, {})
+
+    def test_explicit_check_repairs_incomplete_original_pbp_history(self):
+        from receiving.models import ContainerProductStatus
+        ContainerProductStatus.objects.create(container=self.container, code=self.SKU, was_new=False,
+                                              import_classification="PBP_TO_PON", import_history={"valid": False})
+        check = self.client.get(reverse("receiving:product_check", args=[self.container.pk]))
+        self.assertEqual(check.status_code, 200)
+        self.assertTrue(self.container.product_statuses.get(code=self.SKU).import_history["valid"])
+        response = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
+        self.assertEqual(response.status_code, 200)
+        sheet = load_workbook(BytesIO(response.content), data_only=True).active
+        self.assertEqual(sheet["U2"].value, 13.25)
+        self.assertEqual(sheet["X2"].value, 1800)
+        self.assertTrue(self.container.product_statuses.get(code=self.SKU).import_history["valid"])
+
+    def test_distinct_master_identifiers_and_historical_values_are_preserved(self):
+        self.pbp_entry.code = "TL-PBP-CODE"
+        self.pbp_entry.code2 = "ALTERNATE-CODE"
+        self.pbp_entry.save(update_fields=["code", "code2"])
+        response = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
+        self.assertEqual(response.status_code, 200)
+        history = self.container.product_statuses.get(code=self.SKU).import_history
+        self.assertEqual(history["code"], "TL-PBP-CODE")
+        self.assertEqual(history["pon_sku"], self.SKU)
+        self.assertEqual(history["code2"], "ALTERNATE-CODE")
+        sheet = load_workbook(BytesIO(response.content), data_only=True).active
+        self.assertEqual(sheet["A2"].value, "TL-PBP-CODE")
+        self.assertEqual(sheet["B2"].value, self.SKU)
+        self.assertEqual(sheet["J2"].value, "PONCVL")
+        self.assertEqual(sheet["K2"].value, "CHG02")
+        self.assertTrue(all(cell.fill.fgColor.rgb == "FFF4B183" for cell in sheet[2]))
+
+    def test_recent_sidebar_uses_two_queries_for_twenty_containers(self):
+        from receiving.views import _recent_container_rows
+        for index in range(19):
+            Container.objects.create(identifier=f"SIDEBAR-{index}", customer=self.customer,
+                                     year=2026, created_by=self.user)
+        with self.assertNumQueries(2):
+            containers, rows = _recent_container_rows()
+        self.assertEqual(len(containers), 20)
+        self.assertEqual(len(rows), 20)
+
     def test_customer_report_does_not_mark_migration_new_and_colours_entire_row_orange(self):
         client = [SimpleNamespace(code=self.SKU, quantity=1, description="Client description")]
         received = [SimpleNamespace(code=self.SKU, quantity=1, description="")]

@@ -38,75 +38,71 @@ if (Test-Path -LiteralPath $manifestPath) {
     Write-PonPass 'Package integrity: OK'
 }
 
-$gitExisted = Test-Path -LiteralPath (Join-Path $TargetDir '.git')
-if ($gitExisted) {
-    & git -C $TargetDir status
-    if ($LASTEXITCODE -ne 0) { throw 'Existing Git repository is inaccessible. No update applied.' }
-}
-if (Test-Path -LiteralPath (Join-Path $payload '.git')) { throw 'Payload must not contain .git.' }
-
+# No writes to the installation or backup area before Git and source checks pass.
+Assert-PonStableTarget -TargetDir $TargetDir
 if ($CurrentInstallDir -and [IO.Path]::GetFullPath($CurrentInstallDir).TrimEnd('\') -ine [IO.Path]::GetFullPath($TargetDir).TrimEnd('\')) {
-    throw 'This incremental update only supports the active stable installation.'
+    throw 'Only the stable active installation is supported.'
 }
-$previous = if (Test-Path -LiteralPath (Join-Path $TargetDir 'compose.yaml')) { $TargetDir } else { throw 'Active installation not found. This is an incremental update.' }
+$preCommit = Get-PonPreUpdateCommit -TargetDir $TargetDir
+if (-not (Test-Path -LiteralPath (Join-Path $TargetDir 'compose.yaml'))) { throw 'Active installation not found.' }
+if (-not (Test-Path -LiteralPath (Join-Path $TargetDir '.env'))) { throw 'Existing .env is required.' }
+if (Test-Path -LiteralPath (Join-Path $payload '.git')) { throw 'Payload must not contain .git.' }
+$updateFiles = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'UPDATE_FILES.txt') | Where-Object { $_.Trim() })
+if ($updateFiles.Count -eq 0) { throw 'Empty update file list.' }
+foreach ($relative in $updateFiles) {
+    if ($relative -match '(^[\\/]|:|(^|[\\/])\.\.([\\/]|$)|(^|[\\/])\.git([\\/]|$))') { throw 'Unsafe update path.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $payload $relative) -PathType Leaf)) { throw "Missing payload: $relative" }
+    & git -C $TargetDir ls-files --error-unmatch -- $relative | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Commit the current application file before updating: $relative" }
+}
+& git -C $TargetDir diff --quiet HEAD -- @updateFiles
+if ($LASTEXITCODE -ne 0) { throw 'Update files differ from HEAD. Commit the current validated application before updating; no files changed.' }
+foreach ($line in Get-Content -LiteralPath (Join-Path $PSScriptRoot 'BASE_FILES_SHA256.txt')) {
+    $parts = $line -split "`t", 2
+    $actual = (Get-FileHash -LiteralPath (Join-Path $TargetDir $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $parts[0]) { throw "Base file differs from validated 1001.0832: $($parts[1])" }
+}
+
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $backupDir 'PRE_UPDATE_COMMIT.txt') -Value $preCommit -Encoding ASCII
+Copy-Item -LiteralPath (Join-Path $TargetDir '.env') -Destination (Join-Path $backupDir '.env') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'UPDATE_FILES.txt') -Destination (Join-Path $backupDir 'UPDATE_FILES.txt') -Force
+$dbBackup = Join-Path $backupDir 'database_before_update.sql'
+Backup-PonDatabase -InstallDir $TargetDir -OutputFile $dbBackup
+if (-not (Test-Path -LiteralPath $dbBackup) -or (Get-Item -LiteralPath $dbBackup).Length -eq 0) { throw 'PostgreSQL backup is empty or missing.' }
+Write-PonPass "PostgreSQL backup: $dbBackup"
+Write-PonPass "Pre-update commit: $preCommit"
 
-$envBackup = ''
-$dbBackup = ''
-$firstInstall = $true
-
-if ($previous) {
-    $firstInstall = $false
-    Write-Host "Current installation detected:" -ForegroundColor Yellow
-    Write-Host "  $previous" -ForegroundColor Yellow
-    Write-Host "Creating rollback snapshot..." -ForegroundColor Cyan
-
-    $appBackup = Join-Path $backupDir 'app'
-    New-Item -ItemType Directory -Path $appBackup -Force | Out-Null
-    Copy-PonTree -Source $previous -Destination $appBackup
-
-    $previousEnv = Join-Path $previous '.env'
-    if (Test-Path -LiteralPath $previousEnv) {
-        $envBackup = Join-Path $backupDir '.env'
-        Copy-Item -LiteralPath $previousEnv -Destination $envBackup -Force
-    }
-
-    $dbBackup = Join-Path $backupDir 'database_before_update.sql'
-    if ($gitExisted) { Set-Content -LiteralPath (Join-Path $backupDir 'GIT_EXISTED.txt') -Value 'true' }
-    Backup-PonDatabase -InstallDir $previous -OutputFile $dbBackup
-    Write-PonPass "Database backup: $dbBackup"
-} else {
-    Write-Host 'No previous installation was detected. This will be treated as the first stable-folder install.' -ForegroundColor Yellow
+# Record recovery metadata before the first application-file replacement so a
+# failed prepare can also use 03_ROLLBACK.
+$stateDir = Join-Path $TargetDir '.update_state'
+New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+$pendingState = [ordered]@{
+    release_version = $release
+    prepared_at = (Get-Date).ToString('o')
+    target_dir = $TargetDir
+    previous_install_dir = $TargetDir
+    backup_dir = $backupDir
+    database_backup = $dbBackup
+    first_stable_install = $false
+    git_existed_before = $true
+    pre_update_commit = $preCommit
+    status = 'preparing'
 }
+$pendingState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateDir 'last_update.json') -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $backupRoot 'LAST_BACKUP.txt') -Value $backupDir -Encoding UTF8
 
-if (-not (Test-Path -LiteralPath $TargetDir)) {
-    New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
-} else {
-    Clear-PonDirectory -Path $TargetDir
+# Update only the listed application files in place. No tree clearing, app snapshot,
+# active-folder recreation, .git copy, .env overwrite or continuity relocation.
+foreach ($relative in $updateFiles) {
+    $destination = Join-Path $TargetDir $relative
+    Copy-Item -LiteralPath (Join-Path $payload $relative) -Destination $destination -Force
 }
-
-Write-Host "Copying release files to $TargetDir ..." -ForegroundColor Cyan
-Copy-PonTree -Source $payload -Destination $TargetDir
-
-# Continuity snapshots are persistent project evidence. Restore them after replacing
-# the application tree so an update never deletes the previous LATEST snapshot/history.
-if ($previous) {
-    $previousContinuity = Join-Path (Join-Path $backupDir 'app') 'continuity'
-    if (Test-Path -LiteralPath $previousContinuity) {
-        $targetContinuity = Join-Path $TargetDir 'continuity'
-        Copy-PonTree -Source $previousContinuity -Destination $targetContinuity
-        Write-PonPass 'Existing continuity snapshots preserved.'
-    }
-}
-
-if ($envBackup -and (Test-Path -LiteralPath $envBackup)) {
-    Copy-Item -LiteralPath $envBackup -Destination (Join-Path $TargetDir '.env') -Force
-    Write-PonPass '.env preserved from the previous installation.'
-} elseif (-not (Test-Path -LiteralPath (Join-Path $TargetDir '.env'))) {
-    Copy-Item -LiteralPath (Join-Path $TargetDir '.env.example') -Destination (Join-Path $TargetDir '.env') -Force
-    Write-Host 'A new .env was created from .env.example. Review it before running 02_APPLY_UPDATE.ps1.' -ForegroundColor Yellow
-}
+if ((Get-PonPreUpdateCommit -TargetDir $TargetDir) -ne $preCommit) { throw 'Git HEAD changed during preparation.' }
+$previous = $TargetDir
+$firstInstall = $false
+$gitExisted = $true
 
 $activeEnv = Join-Path $TargetDir '.env'
 foreach ($key in @('PON_MOVES_HOST_DIR','PON_IMPORT_HOST_DIR','PON_REPORT_HOST_DIR')) {
@@ -276,6 +272,7 @@ $state = [ordered]@{
     database_backup = $dbBackup
     first_stable_install = $firstInstall
     git_existed_before = $gitExisted
+    pre_update_commit = $preCommit
     status = 'prepared'
 }
 $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateDir 'last_update.json') -Encoding UTF8

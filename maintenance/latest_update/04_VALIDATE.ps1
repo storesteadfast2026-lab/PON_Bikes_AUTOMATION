@@ -5,6 +5,9 @@ param(
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_support\PON.Update.Common.ps1')
 
+Assert-PonStableTarget -TargetDir $TargetDir
+if (-not (Test-Path -LiteralPath $TargetDir -PathType Container)) { throw 'Active installation is missing.' }
+
 $logDir = Join-Path $TargetDir 'logs'
 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $logPath = Join-Path $logDir ("Validation_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -29,27 +32,23 @@ Set-Content -LiteralPath $logPath -Value ("PON validation started {0}" -f (Get-D
 if (Test-Path -LiteralPath (Join-Path $TargetDir 'compose.yaml')) { Write-Result PASS 'compose.yaml exists.' } else { Write-Result FAIL 'compose.yaml is missing.' }
 if (Test-Path -LiteralPath (Join-Path $TargetDir '.env')) { Write-Result PASS '.env exists.' } else { Write-Result FAIL '.env is missing.' }
 
-$gitStatePath = Join-Path $TargetDir '.update_state\last_update.json'
-$gitRequired = $false
-if (Test-Path -LiteralPath $gitStatePath) {
-    $gitState = Get-Content -LiteralPath $gitStatePath -Raw | ConvertFrom-Json
-    $gitRequired = $gitState.PSObject.Properties['git_existed_before'] -and $gitState.git_existed_before
-}
-if (Test-Path -LiteralPath (Join-Path $TargetDir '.git')) {
-    Write-Result PASS '.git exists.'
-    $gitExit = 1
-    $gitOutput = 'Git CLI unavailable.'
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        $gitOutput = (& git -C $TargetDir status 2>&1 | Out-String)
-        $gitExit = $LASTEXITCODE
-    }
-    Write-Host $gitOutput
-    Add-Content -LiteralPath $logPath -Value $gitOutput -Encoding UTF8
-    if ($gitExit -eq 0) { Write-Result PASS 'Git repository is accessible; working-tree changes are allowed.' }
-    elseif ($gitRequired) { Write-Result FAIL 'Existing Git repository is inaccessible.' }
-    else { Write-Result WARN 'Git status unavailable; no pre-update repository was recorded.' }
-} elseif ($gitRequired) { Write-Result FAIL 'Pre-update Git repository disappeared.' }
-else { Write-Result WARN 'No pre-update Git repository was recorded.' }
+try {
+    Assert-PonStableTarget -TargetDir $TargetDir
+    Get-PonPreUpdateCommit -TargetDir $TargetDir | Out-Null
+    Write-Result PASS '.git exists and git status works in the active repository.'
+    $updateStatePath = Join-Path $TargetDir '.update_state\last_update.json'
+    $updateState = Get-Content -LiteralPath $updateStatePath -Raw | ConvertFrom-Json
+    $commitPath = Join-Path $updateState.backup_dir 'PRE_UPDATE_COMMIT.txt'
+    $dbBackup = Join-Path $updateState.backup_dir 'database_before_update.sql'
+    if (-not (Test-Path -LiteralPath $commitPath)) { throw 'PRE_UPDATE_COMMIT.txt is missing.' }
+    $commit = (Get-Content -LiteralPath $commitPath -Raw).Trim()
+    if ($commit -notmatch '^[a-fA-F0-9]{40,64}$') { throw 'Invalid pre-update commit record.' }
+    & git -C $TargetDir cat-file -e "${commit}^{commit}"
+    if ($LASTEXITCODE -ne 0) { throw 'Pre-update commit is no longer accessible.' }
+    if (-not (Test-Path -LiteralPath $dbBackup) -or (Get-Item -LiteralPath $dbBackup).Length -eq 0) { throw 'PostgreSQL backup is missing or empty.' }
+    if (Test-Path -LiteralPath (Join-Path $updateState.backup_dir 'app')) { throw 'Unexpected full app backup.' }
+    Write-Result PASS 'Pre-update commit and PostgreSQL backup exist; no full app backup.'
+} catch { Write-Result FAIL $_.Exception.Message }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Result FAIL 'Docker CLI is not available.'
@@ -102,12 +101,12 @@ if ($failures -eq 0) {
             Add-Content -LiteralPath $logPath -Value "`n--- Job Order uniqueness ---`n$jobOrderCheck" -Encoding UTF8
             if ($LASTEXITCODE -eq 0) { Write-Result PASS 'No duplicate non-blank Job Orders were found.' } else { Write-Result FAIL 'Duplicate Job Orders exist. Each Job Order must belong to only one container.' }
 
-            $testCommand = 'docker compose exec -T web python manage.py test receiving --verbosity 1 2>&1'
+            $testCommand = 'docker compose exec -T web python manage.py test --verbosity 1 2>&1'
             $receivingTests = (& cmd.exe /d /s /c $testCommand | Out-String)
             $receivingTestCode = $LASTEXITCODE
             Add-Content -LiteralPath $logPath -Value "`n--- complete receiving test suite ---`n$receivingTests" -Encoding UTF8
             Write-Host $receivingTests
-            if ($receivingTestCode -eq 0) { Write-Result PASS 'Complete receiving test suite passed.' } else { Write-Result FAIL 'Receiving test suite failed.' }
+            if ($receivingTestCode -eq 0 -and $receivingTests -match 'Ran 68 tests' -and $receivingTests -match '(?m)^OK\s*$') { Write-Result PASS 'Complete 68-test suite passed.' } else { Write-Result FAIL 'Expected complete suite: 68 tests OK.' }
         }
     }
     finally {
@@ -185,6 +184,12 @@ if (Test-Path -LiteralPath $envPath) {
 
     Push-Location $TargetDir
     try {
+        $masterCheck = (& docker compose exec -T web python manage.py shell -c "from pathlib import Path; from receiving.models import Customer; from receiving.views import _customer_catalog_paths; c=Customer.objects.get(code__iexact='PON'); p=Path(_customer_catalog_paths(c)['app_path']); f=p.open('rb'); assert f.read(1), 'Empty Product Master'; f.close(); print('Readable Product Master:', p)" 2>&1 | Out-String)
+        $masterCheckCode = $LASTEXITCODE
+        Add-Content -LiteralPath $logPath -Value "`n--- Product Master accessibility ---`n$masterCheck" -Encoding UTF8
+        if ($masterCheckCode -eq 0) { Write-Result PASS 'Configured PON Product Master is readable in Docker.' }
+        else { Write-Result FAIL 'Configured PON Product Master is inaccessible in Docker.' }
+
         $transferRuntime = (& docker compose exec -T web python manage.py shell -c "import json; from pathlib import Path; from django.conf import settings; from receiving.translogic_transfer import discover_numbered_import_set; d=Path(settings.PON_TRANSLOGIC_IMPORT_DIRECT_PATH); print(json.dumps(discover_numbered_import_set(d) if settings.PON_TRANSLOGIC_IMPORT_DIRECT_ENABLED else {'available':False,'reason':'direct disabled'}, default=str))" 2>&1 | Out-String).Trim()
         $transferRuntimeCode = $LASTEXITCODE
         Add-Content -LiteralPath $logPath -Value "`n--- Translogic runtime discovery ---`n$transferRuntime" -Encoding UTF8

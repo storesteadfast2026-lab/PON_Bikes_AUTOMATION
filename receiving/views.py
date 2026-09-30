@@ -13,7 +13,7 @@ from django.db import transaction
 from django.core.serializers.json import DjangoJSONEncoder
 from django.core.files import File
 from django.core.files.base import ContentFile
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -673,10 +673,10 @@ def _container_workspace_data(container):
     """Build the compact, guided status used by the single container workflow page."""
     client_batch = ImportBatch.objects.filter(
         source_file__container=container, source_file__kind="CLIENT", status="CONFIRMED"
-    ).first()
+    ).select_related("source_file").first()
     received_batch = ImportBatch.objects.filter(
         source_file__container=container, source_file__kind="RECEIVED", status="CONFIRMED"
-    ).first()
+    ).select_related("source_file").first()
 
     comparison_rows = compare_lines(
         client_batch.lines.all() if client_batch else [],
@@ -687,8 +687,8 @@ def _container_workspace_data(container):
     variance = received_units - expected_units
     exception_count = sum(1 for row in comparison_rows if row["status"] != "MATCH")
 
-    catalog, _, product_rows, product_summary = _product_check_data(container)
-    import_rows = _original_import_rows(container, product_rows)
+    catalog, _, product_rows, product_summary = _persisted_product_check_data(container, received_batch)
+    import_rows = _original_import_rows(container, product_rows, recover=False)
     new_codes = sorted({row["code"] for row in import_rows if row["is_new"]})
     migration_rows = [row for row in import_rows if row.get("is_pbp_to_pon")]
     migration_codes = sorted({row["code"] for row in migration_rows})
@@ -712,7 +712,9 @@ def _container_workspace_data(container):
         for row in migration_rows
         if (row.get("pbp_to_pon_data") or {}).get("valid") or definitions.get(row["code"])
     )
-    products_ready = bool(received_batch and catalog and not pending_new_codes and migration_group1_ready)
+    classified_codes = {row["code"] for row in product_rows if row.get("classification")}
+    received_codes = {code.strip().upper() for code in received_batch.lines.values_list("code", flat=True)} if received_batch else set()
+    products_ready = bool(received_batch and catalog and received_codes.issubset(classified_codes) and not pending_new_codes and migration_group1_ready)
 
     product_check_download_ready = bool(catalog and received_batch)
     new_product_import_download_ready = False
@@ -855,11 +857,16 @@ def _recent_container_rows(limit=20, active_container=None):
     recent_containers = list(Container.objects.select_related("customer").all()[:limit])
     if active_container and all(item.pk != active_container.pk for item in recent_containers):
         recent_containers.insert(0, active_container)
+    batches = ImportBatch.objects.filter(
+        source_file__container_id__in=[item.pk for item in recent_containers],
+        source_file__kind="CLIENT", status="CONFIRMED",
+    ).select_related("source_file")
+    by_container = {}
+    for batch in batches:
+        by_container.setdefault(batch.source_file.container_id, batch)
     recent_rows = []
     for recent_container in recent_containers:
-        client_batch = ImportBatch.objects.filter(
-            source_file__container=recent_container, source_file__kind="CLIENT", status="CONFIRMED"
-        ).select_related("source_file").first()
+        client_batch = by_container.get(recent_container.pk)
         recent_rows.append({
             "container": recent_container,
             "manifest_uploaded": bool(client_batch),
@@ -867,6 +874,16 @@ def _recent_container_rows(limit=20, active_container=None):
             "manifest_name": client_batch.source_file.original_name if client_batch else recent_container.manifest_source_name,
         })
     return recent_containers, recent_rows
+
+def _refresh_customer_product_checks(customer):
+    """Persist classification during explicit master synchronization only."""
+    containers = Container.objects.filter(
+        customer=customer, source_files__kind="RECEIVED",
+        source_files__batches__status="CONFIRMED",
+    ).exclude(status="CLOSED").distinct().select_related("customer")
+    for container in containers:
+        _product_check_data(container)
+
 
 def _activate_product_catalog(file_handle, original_name, digest, user, customer):
     existing = ProductCatalog.objects.filter(customer=customer, sha256=digest).first()
@@ -881,6 +898,7 @@ def _activate_product_catalog(file_handle, original_name, digest, user, customer
         else:
             existing.save(update_fields=["active"])
         existing.sync_short_name_rules()
+        _refresh_customer_product_checks(customer)
         return existing, False
 
     catalog = ProductCatalog(
@@ -909,6 +927,7 @@ def _activate_product_catalog(file_handle, original_name, digest, user, customer
         catalog.active = True
         catalog.save(update_fields=["row_count", "name_dictionary", "active"])
         catalog.sync_short_name_rules()
+    _refresh_customer_product_checks(customer)
     return catalog, True
 
 
@@ -1779,6 +1798,8 @@ def confirm_batch(request, batch_id):
     batch.save(update_fields=["status", "confirmed_at", "total_rows", "total_units"])
     source.status = "CONFIRMED"
     source.save(update_fields=["status"])
+    if source.kind == "RECEIVED":
+        _product_check_data(source.container)
 
     structure_signature = batch.mapping.get("_structure_signature")
     if structure_signature:
@@ -1809,10 +1830,10 @@ def comparison(request, pk):
     container = get_object_or_404(Container, pk=pk)
     client_batch = ImportBatch.objects.filter(
         source_file__container=container, source_file__kind="CLIENT", status="CONFIRMED"
-    ).first()
+    ).select_related("source_file").first()
     received_batch = ImportBatch.objects.filter(
         source_file__container=container, source_file__kind="RECEIVED", status="CONFIRMED"
-    ).first()
+    ).select_related("source_file").first()
     client_lines = client_batch.lines.all() if client_batch else []
     received_lines = received_batch.lines.all() if received_batch else []
     comparison_rows = compare_lines(client_lines, received_lines)
@@ -1884,7 +1905,45 @@ def _enrich_pbp_to_pon_rows_from_catalog_file(catalog, rows):
         row["pbp_to_pon_data"] = pbp_to_pon_product_data(row)
 
 
-def _original_import_rows(container, rows):
+def _persisted_product_check_data(container, received_batch=None):
+    """Read stored decisions only. No master parsing, classification or writes."""
+    catalog = _active_catalog_for_customer(container.customer)
+    if received_batch is None:
+        received_batch = ImportBatch.objects.filter(
+            source_file__container=container, source_file__kind="RECEIVED", status="CONFIRMED",
+        ).first()
+    states = {item.code: item for item in container.product_statuses.all()}
+    grouped = {}
+    if received_batch:
+        for line in received_batch.lines.all():
+            key = (line.code.strip().upper(), line.location.strip().upper())
+            row = grouped.setdefault(key, {"code": key[0], "location": key[1], "long_code": "", "count": 0})
+            row["count"] += line.quantity
+            row["long_code"] = row["long_code"] or line.long_code.strip().upper()
+    definitions = {item.code: item for item in ProductDefinition.objects.filter(code__in=states)}
+    rows = []
+    for row in grouped.values():
+        state = states.get(row["code"])
+        history = state.import_history if state else {}
+        saved = history.get("_check_row", {})
+        classification = saved.get("classification") or (state.import_classification if state else "")
+        if state and not classification and state.was_new:
+            classification = "NEW"
+        rows.append({
+            **saved, **row,
+            "classification": classification,
+            "is_new": classification == "NEW",
+            "is_pbp_to_pon": classification == "PBP_TO_PON",
+            "status": "PBP → PON" if classification == "PBP_TO_PON" else ("New" if classification == "NEW" else ("Existing" if classification else "Needs Product Check")),
+            "tl_code": saved.get("tl_code", ""), "matched_by": saved.get("matched_by", ""),
+            "pbp_to_pon_data": saved.get("pbp_to_pon_data", history),
+            "definition": definitions.get(row["code"]),
+        })
+    rows.sort(key=lambda row: (row["location"], row["code"]))
+    return catalog, received_batch, rows, product_check_summary(rows)
+
+
+def _original_import_rows(container, rows, recover=True):
     """Reuse the per-container decision; never let a later master change membership."""
     statuses = {item.code: item for item in container.product_statuses.all()}
     result = []
@@ -1893,7 +1952,7 @@ def _original_import_rows(container, rows):
         state = statuses.get(row["code"])
         if state is None:
             continue
-        if not state.import_classification:
+        if not state.import_classification and recover:
             # Older versions only stored was_new. Recover the master available at
             # classification time, rather than interpreting a newer PON match.
             original_catalog = ProductCatalog.objects.filter(
@@ -1914,10 +1973,33 @@ def _original_import_rows(container, rows):
             state.import_classification = "NEW" if state.was_new else (
                 "PBP_TO_PON" if original_catalog and original["is_pbp_to_pon"] else "EXISTING"
             )
+            cached = state.import_history.get("_check_row")
             state.import_history = json.loads(json.dumps(
                 original.get("pbp_to_pon_data") or {}, cls=DjangoJSONEncoder,
             ))
+            if cached:
+                state.import_history["_check_row"] = cached
             state.save(update_fields=["import_classification", "import_history"])
+        if recover and state.import_classification == "PBP_TO_PON" and not state.import_history.get("valid"):
+            history_row = current if current.get("is_pbp_to_pon") else None
+            if history_row is None or not (history_row.get("pbp_to_pon_data") or {}).get("valid"):
+                matches = ProductCatalogEntry.objects.filter(
+                    Q(code=state.code) | Q(pon_sku=state.code) | Q(code2=state.code),
+                    customer__iexact="PBP",
+                ).filter(Q(catalog__customer=container.customer) | Q(catalog__customer__isnull=True))
+                entry = matches.filter(catalog__uploaded_at__lte=state.classified_at).order_by("-catalog__uploaded_at", "source_row").first()
+                if entry:
+                    history_row = compare_products_to_catalog(
+                        [SimpleNamespace(code=row["code"], location=row["location"], quantity=row["count"], long_code=row["long_code"])],
+                        [entry], target_customer=container.customer.code,
+                    )[0]
+                    _enrich_pbp_to_pon_rows_from_catalog_file(entry.catalog, [history_row])
+            if history_row and (history_row.get("pbp_to_pon_data") or {}).get("valid"):
+                cached = state.import_history.get("_check_row")
+                state.import_history = json.loads(json.dumps(history_row["pbp_to_pon_data"], cls=DjangoJSONEncoder))
+                if cached:
+                    state.import_history["_check_row"] = cached
+                state.save(update_fields=["import_history"])
         row["classification"] = state.import_classification
         row["is_new"] = state.import_classification == "NEW"
         row["is_pbp_to_pon"] = state.import_classification == "PBP_TO_PON"
@@ -1966,6 +2048,23 @@ def _product_check_data(container):
             row["description"] = source.get("description", "")
             row["long_code"] = row["long_code"] or source.get("long_code", "")
             row["definition"] = definitions.get(row["code"])
+    if rows:
+        states = {item.code: item for item in container.product_statuses.all()}
+        updated = {}
+        for row in rows:
+            state = states[row["code"]]
+            history = dict(state.import_history)
+            if state.import_classification == "PBP_TO_PON" and not history.get("valid") and row.get("is_pbp_to_pon") and row["pbp_to_pon_data"].get("valid"):
+                history.update(json.loads(json.dumps(row["pbp_to_pon_data"], cls=DjangoJSONEncoder)))
+            history["_check_row"] = json.loads(json.dumps({
+                key: value for key, value in row.items()
+                if key not in {"definition", "count", "location"}
+            }, cls=DjangoJSONEncoder))
+            state.import_history = history
+            updated[state.pk] = state
+        ContainerProductStatus.objects.bulk_update(list(updated.values()), ["import_history"])
+        # Recover legacy decisions only during explicit classification.
+        _original_import_rows(container, rows)
     return catalog, received_batch, rows, product_check_summary(rows)
 
 
@@ -2137,7 +2236,9 @@ def export_new_products(request, pk):
     if not container.container_date:
         messages.error(request, "Enter the container date before generating New Product Import.")
         return redirect("receiving:container_detail", pk=pk)
-    catalog, received_batch, rows, summary = _product_check_data(container)
+    catalog, received_batch, rows, summary = _persisted_product_check_data(container)
+    if any(not row.get("classification") for row in rows):
+        catalog, received_batch, rows, summary = _product_check_data(container)
     if not catalog or not received_batch:
         messages.error(request, "Synchronize the product catalogue and confirm the received-bike file first.")
         return redirect("receiving:product_check", pk=pk)

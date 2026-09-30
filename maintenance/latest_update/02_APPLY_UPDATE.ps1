@@ -5,6 +5,9 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_support\PON.Update.Common.ps1')
 
+Assert-PonStableTarget -TargetDir $TargetDir
+Get-PonPreUpdateCommit -TargetDir $TargetDir | Out-Null
+
 $release = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'RELEASE_VERSION.txt') -Raw).Trim()
 $statePath = Join-Path $TargetDir '.update_state\last_update.json'
 
@@ -20,6 +23,8 @@ if (-not (Test-Path -LiteralPath $statePath)) { throw 'Update state is missing. 
 
 $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
 if ($state.release_version -ne $release) { throw "Prepared release $($state.release_version) does not match package release $release." }
+
+if ($state.status -notin @('prepared','applied')) { throw 'Preparation did not complete. Finish 01 or use 03_ROLLBACK.' }
 
 Push-Location $TargetDir
 try {

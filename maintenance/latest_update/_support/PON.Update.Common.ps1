@@ -299,3 +299,27 @@ function Get-PonNumberedImportPattern {
     $result.files = $rows
     return [pscustomobject]$result
 }
+
+function Assert-PonStableTarget {
+    param([string]$TargetDir)
+    if ([IO.Path]::GetFullPath($TargetDir).TrimEnd('\') -ine 'C:\Docker-Projects\PON_Bikes_Automation') {
+        throw 'Only C:\Docker-Projects\PON_Bikes_Automation is supported as the active installation.'
+    }
+}
+
+function Get-PonPreUpdateCommit {
+    param([string]$TargetDir)
+    if (-not (Test-Path -LiteralPath (Join-Path $TargetDir '.git') -PathType Container)) {
+        throw 'Existing .git is missing. Restore the original repository before updating. This update will not initialize Git.'
+    }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'Git CLI is unavailable.' }
+    & git -C $TargetDir status | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Existing Git repository is inaccessible.' }
+    $gitRoot = (& git -C $TargetDir rev-parse --show-toplevel | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($gitRoot).TrimEnd('\') -ine [IO.Path]::GetFullPath($TargetDir).TrimEnd('\')) {
+        throw 'Git root does not match the active installation.'
+    }
+    $commit = (& git -C $TargetDir rev-parse --verify HEAD | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[a-fA-F0-9]{40,64}$') { throw 'Git has no valid current commit.' }
+    return $commit
+}

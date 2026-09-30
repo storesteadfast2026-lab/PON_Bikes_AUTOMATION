@@ -1,0 +1,112 @@
+﻿PON validation started 2026-10-01T09:05:51.0833888+09:30
+[PASS] compose.yaml exists.
+[PASS] .env exists.
+[PASS] .git exists and git status works in the active repository.
+[PASS] Pre-update commit and PostgreSQL backup exist; no full app backup.
+[PASS] Docker CLI is available.
+
+--- docker compose ps ---
+NAME                                 IMAGE                              COMMAND                  SERVICE   CREATED          STATUS                  PORTS
+pon_bike_automation_09161055-db-1    postgres:16-alpine                 "docker-entrypoint.sΓÇª"   db        19 hours ago     Up 19 hours (healthy)   5432/tcp
+pon_bike_automation_09161055-web-1   pon_bike_automation_09161055-web   "/app/docker-entrypoΓÇª"   web       10 seconds ago   Up 9 seconds            0.0.0.0:8001->8000/tcp, [::]:8001->8000/tcp
+
+[PASS] Web container exists.
+[PASS] Database container exists.
+
+--- django check ---
+System check identified no issues (0 silenced).
+
+[PASS] Django system check passed.
+
+--- receiving migrations ---
+receiving
+ [X] 0001_initial
+ [X] 0002_product_catalog
+ [X] 0003_generatedexport_productdefinition
+ [X] 0004_container_container_date
+ [X] 0005_productcatalogentry_xml_metadata
+ [X] 0006_group1_family_mapping
+ [X] 0007_short_name_dictionary_rule
+ [X] 0008_stage2_product_moves
+ [X] 0009_client_receiving_report
+ [X] 0010_customer_product_catalog_configuration
+ [X] 0011_container_job_order
+ [X] 0012_product_master_xls
+ [X] 0013_multi_container_job_order
+ [X] 0014_alter_shortnamedictionaryrule_confidence_and_more
+ [X] 0015_original_import_selection
+
+[PASS] All receiving migrations are applied.
+
+--- model / migration state check ---
+No changes detected in app 'receiving'
+
+[PASS] Receiving models match migration state.
+
+--- database counts ---
+Containers= 5
+Customers= 1
+
+[PASS] Django can read the PostgreSQL database.
+
+--- Job Order uniqueness ---
+[]
+
+[PASS] No duplicate non-blank Job Orders were found.
+
+--- complete receiving test suite ---
+Found 68 test(s).
+Creating test database for alias 'default'...
+System check identified no issues (0 silenced).
+....................................................................
+----------------------------------------------------------------------
+Ran 68 tests in 7.175s
+
+OK
+Destroying test database for alias 'default'...
+
+[PASS] Complete 68-test suite passed.
+[PASS] PON_PRODUCT_HOST_DIR exists: C:/Docker-Projects/Freight-Calc-v1.6/uploaded_data
+[PASS] PON_MOVES_HOST_DIR exists: C:/Docker-Projects/PON_Bike_Data/translogic
+[PASS] PON_IMPORT_HOST_DIR exists: C:/Docker-Projects/PON_Bike_Data/import
+[PASS] PON_REPORT_HOST_DIR exists: C:/Docker-Projects/PON_Bike_Data/reports
+[WARN] PON_HOST_PATH is not configured.
+[PASS] Product master found: C:\Docker-Projects\Freight-Calc-v1.6\uploaded_data\products_pon_pbp_auto.xls
+
+--- Translogic preflight ---
+{
+    "inspected_at":  "2026-10-01T09:05:31.1206143+09:30",
+    "import_display_file":  "",
+    "import_display_dir":  "",
+    "import_host_accessible":  false,
+    "import_pattern":  "",
+    "import_pattern_extension":  "",
+    "import_oldest_file":  "",
+    "import_oldest_time":  "",
+    "import_pattern_reason":  "",
+    "import_docker_direct":  false,
+    "import_docker_host_dir":  "",
+    "product_moves_display_file":  "",
+    "product_moves_display_dir":  "",
+    "product_moves_host_accessible":  false,
+    "product_moves_docker_direct":  false,
+    "product_moves_docker_host_dir":  ""
+}
+[WARN] Direct Translogic import mount is not enabled; Download/manual transfer remains the safe fallback.
+[WARN] Direct PRODUCT_MOVES mount is not enabled; existing working-copy/manual-upload flow remains active.
+
+--- Product Master accessibility ---
+Readable Product Master: /data/pon_products/products_pon_pbp_auto.xls
+
+[PASS] Configured PON Product Master is readable in Docker.
+
+--- Translogic runtime discovery ---
+{"available": false, "reason": "direct disabled"}
+
+--- PRODUCT_MOVES runtime source ---
+mode=fallback
+path=/data/pon_translogic/PRODUCT_MOVES.CSV
+exists=True
+
+[PASS] PRODUCT_MOVES Refresh can currently read its configured runtime source.
+[PASS] HTTP application responded on port 8001.
