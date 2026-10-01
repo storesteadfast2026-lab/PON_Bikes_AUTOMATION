@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import ntpath
+import re
 from types import SimpleNamespace
 
 from django.conf import settings
@@ -13,8 +14,8 @@ from django.db import transaction
 from django.core.serializers.json import DjangoJSONEncoder
 from django.core.files import File
 from django.core.files.base import ContentFile
-from django.db.models import Q, Sum
-from django.http import Http404, HttpResponse
+from django.db.models import Max, Q, Sum
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.urls import reverse
@@ -33,6 +34,10 @@ from .models import (
     Container,
     ContainerProductStatus,
     Customer,
+    FirstScanEvent,
+    FirstScanPause,
+    FirstScanPhoto,
+    FirstScanSession,
     GeneratedExport,
     Group1Family,
     ImportBatch,
@@ -47,6 +52,7 @@ from .models import (
 )
 from .services import (
     PRODUCT_CATALOG_PATTERN,
+    LOCATION_PATTERN,
     EXPORT_DEFAULTS,
     analyse_workbook_mapping,
     available_server_files,
@@ -1048,6 +1054,416 @@ def sync_product_catalog(request):
         action = "synchronized" if created else "has not changed"
         messages.success(request, f"{customer.code}: {catalog.original_name} {action}: {catalog.row_count} product row(s).")
     return redirect("receiving:dashboard")
+
+
+def _first_scan_client_batch(container):
+    return ImportBatch.objects.filter(
+        source_file__container=container,
+        source_file__kind="CLIENT",
+        status="CONFIRMED",
+    ).first()
+
+
+def _first_scan_batch(container, user):
+    batch = ImportBatch.objects.filter(
+        source_file__container=container,
+        source_file__kind="RECEIVED",
+        status="CONFIRMED",
+    ).select_related("source_file").first()
+    if batch:
+        return batch
+
+    created_at = timezone.now()
+    marker = f"first-scan-scanner:{container.pk}:{created_at.isoformat()}"
+    filename = f"First_Scan_Scanner_{container.identifier}_{created_at:%Y%m%d_%H%M%S}.txt"
+    source = SourceFile(
+        container=container,
+        kind="RECEIVED",
+        original_name=filename,
+        sha256=hashlib.sha256(marker.encode("utf-8")).hexdigest(),
+        status="CONFIRMED",
+        uploaded_by=user,
+    )
+    source.file.save(filename, ContentFile(marker.encode("utf-8")), save=True)
+    return ImportBatch.objects.create(
+        source_file=source,
+        status="CONFIRMED",
+        mapping={"scanner": True, "location_stream": True},
+        total_rows=0,
+        total_units=0,
+        confirmed_at=created_at,
+        created_by=user,
+    )
+
+
+def _normalise_scanned_value(value):
+    return re.sub(r"\s+", "", str(value or "").strip().upper())
+
+
+def _first_scan_product_from_code(container, batch, value):
+    client_batch = _first_scan_client_batch(container)
+    for candidate_batch in (client_batch, batch):
+        if not candidate_batch:
+            continue
+        line = candidate_batch.lines.filter(code__iexact=value).exclude(code="").first()
+        if line:
+            return {"code": line.code.strip().upper(), "long_code": line.long_code.strip().upper()}
+
+    definition = ProductDefinition.objects.filter(code__iexact=value).first()
+    if definition:
+        return {"code": definition.code.strip().upper(), "long_code": definition.long_code.strip().upper()}
+
+    catalog = _active_catalog_for_customer(container.customer)
+    if catalog:
+        entry = catalog.entries.filter(
+            Q(code__iexact=value) | Q(pon_sku__iexact=value) | Q(code2__iexact=value)
+        ).order_by("source_row", "pk").first()
+        if entry:
+            return {"code": value, "long_code": ""}
+    return None
+
+
+def _first_scan_product_from_long_code(container, batch, value):
+    client_batch = _first_scan_client_batch(container)
+    for candidate_batch in (client_batch, batch):
+        if not candidate_batch:
+            continue
+        line = candidate_batch.lines.filter(long_code__iexact=value).exclude(long_code="").first()
+        if line:
+            return {"code": line.code.strip().upper(), "long_code": line.long_code.strip().upper()}
+
+    definition = ProductDefinition.objects.filter(long_code__iexact=value).exclude(long_code="").first()
+    if definition:
+        return {"code": definition.code.strip().upper(), "long_code": definition.long_code.strip().upper()}
+    return None
+
+
+def _resolve_first_scan_product(session, value):
+    if session.mode == "CODE":
+        product = _first_scan_product_from_code(session.container, session.batch, value)
+        return product, "CODE" if product else ""
+    if session.mode == "LONG_CODE":
+        product = _first_scan_product_from_long_code(session.container, session.batch, value)
+        return product, "LONG_CODE" if product else ""
+
+    product = _first_scan_product_from_code(session.container, session.batch, value)
+    if product:
+        return product, "CODE"
+    product = _first_scan_product_from_long_code(session.container, session.batch, value)
+    return product, "LONG_CODE" if product else ""
+
+
+def _first_scan_pause_seconds(session, end_time=None):
+    end_time = end_time or session.finished_at or timezone.now()
+    total = 0
+    for pause in session.pauses.all():
+        pause_end = pause.resumed_at or end_time
+        total += max(0, int((pause_end - pause.started_at).total_seconds()))
+    return total
+
+
+def _first_scan_state(session):
+    session.batch.refresh_from_db(fields=["total_rows", "total_units"])
+    client_batch = _first_scan_client_batch(session.container)
+    expected_total = client_batch.total_units if client_batch else None
+    current_total = session.batch.total_units
+    completion = min(100, round((current_total / expected_total) * 100)) if expected_total else 0
+    pallet_total = 0
+    pallet_expected = None
+    if session.current_pallet:
+        pallet_total = session.batch.lines.filter(location__iexact=session.current_pallet).aggregate(
+            total=Sum("quantity")
+        )["total"] or 0
+        if client_batch:
+            pallet_expected = client_batch.lines.filter(location__iexact=session.current_pallet).aggregate(
+                total=Sum("quantity")
+            )["total"] or None
+    pallet_completion = min(100, round((pallet_total / pallet_expected) * 100)) if pallet_expected else 0
+
+    end_time = session.finished_at or timezone.now()
+    elapsed_seconds = max(0, int((end_time - session.started_at).total_seconds()))
+    paused_seconds = _first_scan_pause_seconds(session, end_time)
+    recent = []
+    if session.current_pallet:
+        for event in session.events.filter(event_type="BIKE", pallet__iexact=session.current_pallet)[:10]:
+            recent.append({
+                "id": event.pk,
+                "time": timezone.localtime(event.scanned_at).strftime("%H:%M:%S"),
+                "input_type": event.get_input_type_display(),
+                "scanned_value": event.scanned_value,
+                "resolved_code": event.resolved_code,
+                "result": event.result.lower(),
+                "message": event.message,
+            })
+    last_event = session.events.first()
+    last_scan = None
+    if last_event:
+        last_scan = {
+            "scanned_value": last_event.scanned_value,
+            "resolved_code": last_event.resolved_code,
+            "long_code": last_event.long_code,
+            "pallet": last_event.pallet,
+            "input_type": last_event.get_input_type_display(),
+            "result": last_event.result.lower(),
+            "message": last_event.message,
+        }
+    return {
+        "session_id": session.pk,
+        "status": session.status,
+        "mode": session.get_mode_display(),
+        "current_pallet": session.current_pallet,
+        "expected_total": expected_total,
+        "current_total": current_total,
+        "completion": completion,
+        "pallet_total": pallet_total,
+        "pallet_expected": pallet_expected,
+        "pallet_completion": pallet_completion,
+        "elapsed_seconds": elapsed_seconds,
+        "paused_seconds": paused_seconds,
+        "active_seconds": max(0, elapsed_seconds - paused_seconds),
+        "last_scan": last_scan,
+        "recent": recent,
+    }
+
+
+def _first_scan_error_event(session, value, message, input_type="CODE"):
+    return FirstScanEvent.objects.create(
+        session=session,
+        event_type="BIKE",
+        input_type=input_type,
+        result="ERROR",
+        scanned_value=value,
+        pallet=session.current_pallet,
+        message=message,
+    )
+
+
+def _process_first_scan_value(session, scanned_value):
+    value = _normalise_scanned_value(scanned_value)
+    if not value:
+        return False, "error", "Scan a barcode before continuing.", None
+    if session.status != "ACTIVE":
+        return False, "error", "The scan session is paused or finished.", None
+
+    if LOCATION_PATTERN.fullmatch(value):
+        session.current_pallet = value
+        session.save(update_fields=["current_pallet", "updated_at"])
+        event = FirstScanEvent.objects.create(
+            session=session,
+            event_type="PALLET",
+            input_type="PALLET",
+            result="SUCCESS",
+            scanned_value=value,
+            pallet=value,
+            message=f"Current pallet changed to {value}.",
+        )
+        return True, "success", event.message, event
+
+    product, input_type = _resolve_first_scan_product(session, value)
+    if not product:
+        event = _first_scan_error_event(
+            session,
+            value,
+            "Unrecognised barcode. No bike was registered.",
+            "LONG_CODE" if session.mode == "LONG_CODE" else "CODE",
+        )
+        return False, "error", event.message, event
+    if not session.current_pallet:
+        event = _first_scan_error_event(
+            session,
+            value,
+            "Scan a pallet before scanning bikes. No bike was registered.",
+            input_type,
+        )
+        event.resolved_code = product["code"]
+        event.long_code = product["long_code"]
+        event.save(update_fields=["resolved_code", "long_code"])
+        return False, "error", event.message, event
+
+    client_batch = _first_scan_client_batch(session.container)
+    expected_for_code = None
+    if client_batch:
+        expected_for_code = client_batch.lines.filter(code__iexact=product["code"]).aggregate(
+            total=Sum("quantity")
+        )["total"] or None
+    scanned_for_code = session.batch.lines.filter(code__iexact=product["code"]).aggregate(
+        total=Sum("quantity")
+    )["total"] or 0
+    if expected_for_code is not None and scanned_for_code >= expected_for_code:
+        event = _first_scan_error_event(
+            session,
+            value,
+            f"Expected quantity for {product['code']} has already been reached. No bike was registered.",
+            input_type,
+        )
+        event.resolved_code = product["code"]
+        event.long_code = product["long_code"]
+        event.save(update_fields=["resolved_code", "long_code"])
+        return False, "error", event.message, event
+
+    scanned_at = timezone.now()
+    next_source_row = (session.batch.lines.aggregate(maximum=Max("source_row"))["maximum"] or 0) + 1
+    line = NormalizedLine.objects.create(
+        batch=session.batch,
+        source_sheet="Scanner",
+        source_row=next_source_row,
+        code=product["code"],
+        long_code=product["long_code"],
+        quantity=1,
+        location=session.current_pallet,
+        container_identifier=session.container.identifier,
+        raw_data={
+            "scanner_session_id": session.pk,
+            "scanned_value": value,
+            "input_type": input_type,
+            "scanned_at": scanned_at.isoformat(),
+        },
+    )
+    session.batch.total_rows += 1
+    session.batch.total_units += 1
+    session.batch.save(update_fields=["total_rows", "total_units"])
+    event = FirstScanEvent.objects.create(
+        session=session,
+        normalized_line=line,
+        event_type="BIKE",
+        input_type=input_type,
+        result="SUCCESS",
+        scanned_value=value,
+        resolved_code=product["code"],
+        long_code=product["long_code"],
+        pallet=session.current_pallet,
+        message=f"{product['code']} registered on {session.current_pallet}.",
+        scanned_at=scanned_at,
+    )
+    return True, "success", event.message, event
+
+
+def _first_scan_result(request, container, session, ok, level, message, status=200):
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return JsonResponse(
+            {"ok": ok, "level": level, "message": message, "state": _first_scan_state(session)},
+            status=status,
+        )
+    getattr(messages, level)(request, message)
+    return redirect("receiving:first_scan_scanner", pk=container.pk)
+
+
+@login_required
+@transaction.atomic
+def first_scan_scanner(request, pk):
+    container = get_object_or_404(Container.objects.select_related("customer"), pk=pk)
+    if request.method == "POST":
+        closed_redirect = _closed_container_guard(request, container)
+        if closed_redirect:
+            return closed_redirect
+
+    session = FirstScanSession.objects.filter(
+        container=container, status__in=["ACTIVE", "PAUSED"]
+    ).select_related("batch", "container__customer").first()
+
+    if request.method == "POST":
+        action = request.POST.get("action", "")
+        if action == "start":
+            if not container.job_order:
+                messages.error(request, "Assign a unique Job Order before starting the operational First Scan.")
+                return redirect("receiving:container_detail", pk=container.pk)
+            mode = request.POST.get("mode", "AUTO")
+            if mode not in dict(FirstScanSession.MODE_CHOICES):
+                messages.error(request, "Select Auto, Code or Long Code.")
+                return redirect("receiving:first_scan_scanner", pk=container.pk)
+            if session:
+                messages.warning(request, "The existing First Scan session was reopened; no new session was created.")
+            else:
+                session = FirstScanSession.objects.create(
+                    container=container,
+                    batch=_first_scan_batch(container, request.user),
+                    mode=mode,
+                    created_by=request.user,
+                )
+                messages.success(request, "First Scan started. Scan a pallet, then scan bikes continuously.")
+            return redirect("receiving:first_scan_scanner", pk=container.pk)
+
+        if not session:
+            messages.error(request, "Start First Scan before using scanner controls.")
+            return redirect("receiving:first_scan_scanner", pk=container.pk)
+        session = FirstScanSession.objects.select_for_update().select_related(
+            "batch", "container__customer"
+        ).get(pk=session.pk)
+
+        if action == "scan":
+            ok, level, message, event = _process_first_scan_value(session, request.POST.get("scanned_value"))
+            return _first_scan_result(request, container, session, ok, level, message, 200 if ok else 400)
+        if action == "pause":
+            if session.status == "ACTIVE":
+                FirstScanPause.objects.create(session=session)
+                session.status = "PAUSED"
+                session.save(update_fields=["status", "updated_at"])
+                return _first_scan_result(request, container, session, True, "success", "First Scan paused.")
+            return _first_scan_result(request, container, session, False, "warning", "First Scan is already paused.")
+        if action == "resume":
+            if session.status == "PAUSED":
+                pause = session.pauses.filter(resumed_at__isnull=True).order_by("-started_at").first()
+                if pause:
+                    pause.resumed_at = timezone.now()
+                    pause.save(update_fields=["resumed_at"])
+                session.status = "ACTIVE"
+                session.save(update_fields=["status", "updated_at"])
+                return _first_scan_result(request, container, session, True, "success", "First Scan resumed.")
+            return _first_scan_result(request, container, session, False, "warning", "First Scan is already active.")
+        if action == "finish":
+            now = timezone.now()
+            pause = session.pauses.filter(resumed_at__isnull=True).order_by("-started_at").first()
+            if pause:
+                pause.resumed_at = now
+                pause.save(update_fields=["resumed_at"])
+            session.status = "FINISHED"
+            session.finished_at = now
+            session.save(update_fields=["status", "finished_at", "updated_at"])
+            messages.success(request, "First Scan finished. All successful scans remain in the confirmed First Scan data.")
+            return redirect("receiving:container_detail", pk=container.pk)
+        if action == "photo":
+            photo = request.FILES.get("photo")
+            if not photo or not str(getattr(photo, "content_type", "")).startswith("image/"):
+                return _first_scan_result(request, container, session, False, "error", "Select a valid photo file.", 400)
+            if photo.size > settings.MAX_UPLOAD_SIZE:
+                return _first_scan_result(request, container, session, False, "error", "The photo exceeds the upload size limit.", 400)
+            event = session.events.filter(
+                event_type="BIKE", result="SUCCESS", pallet=session.current_pallet
+            ).first()
+            FirstScanPhoto.objects.create(
+                session=session,
+                event=event,
+                file=photo,
+                pallet=session.current_pallet,
+                uploaded_by=request.user,
+            )
+            return _first_scan_result(request, container, session, True, "success", "Photo saved without changing scan counts.")
+
+        messages.error(request, "Unknown scanner action.")
+        return redirect("receiving:first_scan_scanner", pk=container.pk)
+
+    client_batch = _first_scan_client_batch(container)
+    received_batch = ImportBatch.objects.filter(
+        source_file__container=container,
+        source_file__kind="RECEIVED",
+        status="CONFIRMED",
+    ).first()
+    expected_total = client_batch.total_units if client_batch else None
+    current_total = received_batch.total_units if received_batch else 0
+    completion = min(100, round((current_total / expected_total) * 100)) if expected_total else 0
+    return render(
+        request,
+        "receiving/first_scan_scanner.html",
+        {
+            "container": container,
+            "session": session,
+            "scanner_state": _first_scan_state(session) if session else None,
+            "expected_total": expected_total,
+            "current_total": current_total,
+            "completion": completion,
+            "mode_choices": FirstScanSession.MODE_CHOICES,
+        },
+    )
 
 
 @login_required

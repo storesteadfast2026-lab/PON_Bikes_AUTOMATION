@@ -101,6 +101,12 @@ def product_moves_upload_path(instance, filename):
     return f"containers/{instance.container.year}/{safe_container}/stage2/{filename}"
 
 
+def first_scan_photo_upload_path(instance, filename):
+    container = instance.session.container
+    safe_container = container.identifier.replace("/", "-").replace("\\", "-")
+    return f"containers/{container.year}/{safe_container}/first_scan_photos/{filename}"
+
+
 class ProductCatalog(models.Model):
     customer = models.ForeignKey(
         Customer,
@@ -515,3 +521,93 @@ class NormalizedLine(models.Model):
 
     def __str__(self):
         return f"{self.code} x {self.quantity}"
+
+
+class FirstScanSession(models.Model):
+    MODE_CHOICES = [
+        ("AUTO", "Auto"),
+        ("CODE", "Code"),
+        ("LONG_CODE", "Long Code"),
+    ]
+    STATUS_CHOICES = [
+        ("ACTIVE", "Active"),
+        ("PAUSED", "Paused"),
+        ("FINISHED", "Finished"),
+    ]
+
+    container = models.ForeignKey(Container, on_delete=models.CASCADE, related_name="first_scan_sessions")
+    batch = models.ForeignKey(ImportBatch, on_delete=models.PROTECT, related_name="first_scan_sessions")
+    mode = models.CharField(max_length=12, choices=MODE_CHOICES, default="AUTO")
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="ACTIVE")
+    current_pallet = models.CharField(max_length=30, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["container"],
+                condition=models.Q(status__in=["ACTIVE", "PAUSED"]),
+                name="unique_open_first_scan_session_per_container",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.container.identifier} · {self.get_status_display()}"
+
+
+class FirstScanPause(models.Model):
+    session = models.ForeignKey(FirstScanSession, on_delete=models.CASCADE, related_name="pauses")
+    started_at = models.DateTimeField(default=timezone.now)
+    resumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["started_at", "id"]
+
+
+class FirstScanEvent(models.Model):
+    EVENT_CHOICES = [("PALLET", "Pallet"), ("BIKE", "Bike")]
+    INPUT_CHOICES = [("PALLET", "Pallet"), ("CODE", "Code"), ("LONG_CODE", "Long Code")]
+    RESULT_CHOICES = [("SUCCESS", "Success"), ("WARNING", "Warning"), ("ERROR", "Error")]
+
+    session = models.ForeignKey(FirstScanSession, on_delete=models.CASCADE, related_name="events")
+    normalized_line = models.OneToOneField(
+        NormalizedLine,
+        on_delete=models.SET_NULL,
+        related_name="first_scan_event",
+        null=True,
+        blank=True,
+    )
+    event_type = models.CharField(max_length=10, choices=EVENT_CHOICES)
+    input_type = models.CharField(max_length=12, choices=INPUT_CHOICES)
+    result = models.CharField(max_length=10, choices=RESULT_CHOICES)
+    scanned_value = models.CharField(max_length=180)
+    resolved_code = models.CharField(max_length=100, blank=True)
+    long_code = models.CharField(max_length=160, blank=True)
+    pallet = models.CharField(max_length=30, blank=True)
+    message = models.CharField(max_length=255, blank=True)
+    scanned_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-scanned_at", "-id"]
+
+
+class FirstScanPhoto(models.Model):
+    session = models.ForeignKey(FirstScanSession, on_delete=models.CASCADE, related_name="photos")
+    event = models.ForeignKey(
+        FirstScanEvent,
+        on_delete=models.SET_NULL,
+        related_name="photos",
+        null=True,
+        blank=True,
+    )
+    file = models.FileField(upload_to=first_scan_photo_upload_path)
+    pallet = models.CharField(max_length=30, blank=True)
+    captured_at = models.DateTimeField(default=timezone.now)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+
+    class Meta:
+        ordering = ["-captured_at", "-id"]

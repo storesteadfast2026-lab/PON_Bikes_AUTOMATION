@@ -1,0 +1,263 @@
+{% extends "receiving/base.html" %}
+{% block title %}First Scan · {{ container.identifier }}{% endblock %}
+{% block body_class %}first-scan-page{% endblock %}
+{% block content %}
+<div class="scanner-shell">
+  <div class="scanner-header">
+    <div>
+      <p class="eyebrow">First Scan</p>
+      <h1>{{ container.identifier }}</h1>
+      <p><strong>{{ container.customer.code }}</strong> · {{ container.customer.name }}</p>
+    </div>
+    <a class="button secondary" href="{% url 'receiving:container_detail' container.pk %}#receive">Back to container</a>
+  </div>
+
+  {% if not session %}
+  <section class="card scanner-start-card">
+    <h2>Start continuous scanning</h2>
+    <dl class="scanner-definition">
+      <div><dt>Container</dt><dd>{{ container.identifier }}</dd></div>
+      <div><dt>Customer</dt><dd>{{ container.customer.code }}</dd></div>
+      <div><dt>Process type</dt><dd>First Scan</dd></div>
+      <div><dt>Total expected bikes</dt><dd>{% if expected_total != None %}{{ expected_total }}{% else %}Not available{% endif %}</dd></div>
+      <div><dt>Current scanned total</dt><dd>{{ current_total }}</dd></div>
+      <div><dt>Completion</dt><dd>{{ completion }}%</dd></div>
+    </dl>
+    <div class="scanner-progress-card scanner-start-progress">
+      <div><strong>Container completion</strong><span>{{ completion }}%</span></div>
+      <progress max="100" value="{{ completion }}">{{ completion }}%</progress>
+    </div>
+    <form method="post" class="scanner-mode-form">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="start">
+      <fieldset>
+        <legend>Choose scan mode once</legend>
+        {% for value, label in mode_choices %}
+        <label class="scanner-mode-option {% if value == 'AUTO' %}recommended{% endif %}">
+          <input type="radio" name="mode" value="{{ value }}" {% if value == 'AUTO' %}checked{% endif %}>
+          <span><strong>{{ label }}</strong>{% if value == 'AUTO' %}<small>Recommended · accepts Product Code, Long Code and pallet number</small>{% elif value == 'CODE' %}<small>Bike scans are resolved as Product Code</small>{% else %}<small>Bike scans are resolved as Long Code</small>{% endif %}</span>
+        </label>
+        {% endfor %}
+      </fieldset>
+      <button class="button primary" type="submit">Start Scan</button>
+    </form>
+  </section>
+  {% else %}
+  {{ scanner_state|json_script:"scanner-state" }}
+  <section class="scanner-live" data-session-status="{{ session.status }}">
+    <div class="scanner-summary-grid">
+      <div class="scanner-summary-card"><span>Mode</span><strong>{{ session.get_mode_display }}</strong></div>
+      <div class="scanner-summary-card"><span>Container scanned</span><strong id="container-total">{{ scanner_state.current_total }}</strong><small id="container-expected">{% if scanner_state.expected_total != None %}of {{ scanner_state.expected_total }} expected{% else %}expected total unknown{% endif %}</small></div>
+      <div class="scanner-summary-card pallet-card"><span>Current pallet</span><strong id="current-pallet">{% if scanner_state.current_pallet %}{{ scanner_state.current_pallet }}{% else %}Scan pallet first{% endif %}</strong></div>
+      <div class="scanner-summary-card"><span>Pallet scanned</span><strong id="pallet-total">{{ scanner_state.pallet_total }}</strong><small id="pallet-expected">{% if scanner_state.pallet_expected != None %}of {{ scanner_state.pallet_expected }} expected{% else %}expected quantity unknown{% endif %}</small></div>
+    </div>
+
+    <div class="scanner-progress-card">
+      <div><strong>Container completion</strong><span id="completion-label">{{ scanner_state.completion }}%</span></div>
+      <progress id="container-progress" max="100" value="{{ scanner_state.completion }}">{{ scanner_state.completion }}%</progress>
+      <div class="pallet-progress-line"><strong>Pallet completion</strong><span id="pallet-completion-label">{% if scanner_state.pallet_expected %}{{ scanner_state.pallet_completion }}%{% else %}Not available{% endif %}</span></div>
+      <progress id="pallet-progress" max="100" value="{{ scanner_state.pallet_completion }}">{{ scanner_state.pallet_completion }}%</progress>
+    </div>
+
+    <div id="scanner-feedback" class="scanner-feedback" aria-live="assertive"></div>
+
+    {% if session.status == 'ACTIVE' %}
+    <form method="post" id="continuous-scan-form" class="continuous-scan-form" autocomplete="off">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="scan">
+      <label for="scanned-value">Ready for next scan</label>
+      <div>
+        <input id="scanned-value" name="scanned_value" type="text" autofocus inputmode="text" spellcheck="false" placeholder="Scan pallet, Code or Long Code">
+        <button class="button primary" type="submit">Register scan</button>
+      </div>
+      <small>No confirmation is required. Each scanner Enter registers the value and immediately returns focus here.</small>
+    </form>
+    {% else %}
+    <div class="scanner-paused-banner">Scanning is paused. The container, pallet, scans and counters are preserved.</div>
+    {% endif %}
+
+    <section id="last-scan-card" class="scanner-last-card" {% if not scanner_state.last_scan %}hidden{% endif %}>
+      <h2>Last result</h2>
+      <dl class="scanner-definition">
+        <div><dt>Scanned value</dt><dd id="last-scanned-value">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.scanned_value }}{% endif %}</dd></div>
+        <div><dt>Resolved Code</dt><dd id="last-resolved-code">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.resolved_code|default:"—" }}{% endif %}</dd></div>
+        <div><dt>Long Code</dt><dd id="last-long-code">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.long_code|default:"—" }}{% endif %}</dd></div>
+        <div><dt>Pallet</dt><dd id="last-pallet">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.pallet|default:"—" }}{% endif %}</dd></div>
+        <div><dt>Result</dt><dd id="last-message">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.message }}{% endif %}</dd></div>
+      </dl>
+    </section>
+
+    <section class="card scanner-recent-card">
+      <div class="table-heading"><h2>Recent scans for current pallet</h2><small>Latest 10</small></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Code / Long Code</th><th>Result</th></tr></thead>
+          <tbody id="recent-scans-body">
+          {% for item in scanner_state.recent %}
+            <tr><td>{{ item.time }}</td><td><strong>{{ item.input_type }}</strong><br>{{ item.scanned_value }}{% if item.resolved_code %}<br><small>{{ item.resolved_code }}</small>{% endif %}</td><td class="scanner-result-{{ item.result }}">{{ item.message }}</td></tr>
+          {% empty %}
+            <tr class="empty-row"><td colspan="3">No bike scans for the current pallet yet.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="scanner-time-grid">
+      <div><span>Total elapsed</span><strong id="elapsed-time">00:00:00</strong></div>
+      <div><span>Active scanning</span><strong id="active-time">00:00:00</strong></div>
+      <div><span>Paused</span><strong id="paused-time">00:00:00</strong></div>
+    </div>
+
+    <div class="scanner-controls">
+      {% if session.status == 'ACTIVE' %}
+      <form method="post">{% csrf_token %}<input type="hidden" name="action" value="pause"><button class="button secondary" type="submit">Pause Scan</button></form>
+      {% else %}
+      <form method="post">{% csrf_token %}<input type="hidden" name="action" value="resume"><button class="button primary" type="submit">Resume Scan</button></form>
+      {% endif %}
+      <form method="post">{% csrf_token %}<input type="hidden" name="action" value="finish"><button class="button secondary" type="submit">Finish Scan</button></form>
+    </div>
+
+    <details class="scanner-photo-panel">
+      <summary>Take Photo</summary>
+      <form method="post" enctype="multipart/form-data" id="scanner-photo-form">
+        {% csrf_token %}<input type="hidden" name="action" value="photo">
+        <input type="file" name="photo" accept="image/*" capture="environment" required>
+        <button class="button secondary" type="submit">Save Photo</button>
+      </form>
+      <small>The photo is linked to this container, current pallet and latest successful bike scan when available.</small>
+    </details>
+  </section>
+
+  <script>
+  (() => {
+    const stateElement = document.getElementById('scanner-state');
+    if (!stateElement) return;
+    let state = JSON.parse(stateElement.textContent);
+    let clockBase = Date.now();
+
+    const formatDuration = (seconds) => {
+      const safe = Math.max(0, Math.floor(seconds));
+      const hours = String(Math.floor(safe / 3600)).padStart(2, '0');
+      const minutes = String(Math.floor((safe % 3600) / 60)).padStart(2, '0');
+      const secs = String(safe % 60).padStart(2, '0');
+      return `${hours}:${minutes}:${secs}`;
+    };
+
+    const renderTimers = () => {
+      const extra = Math.floor((Date.now() - clockBase) / 1000);
+      const elapsed = state.elapsed_seconds + (state.status === 'FINISHED' ? 0 : extra);
+      const paused = state.paused_seconds + (state.status === 'PAUSED' ? extra : 0);
+      const active = state.active_seconds + (state.status === 'ACTIVE' ? extra : 0);
+      document.getElementById('elapsed-time').textContent = formatDuration(elapsed);
+      document.getElementById('paused-time').textContent = formatDuration(paused);
+      document.getElementById('active-time').textContent = formatDuration(active);
+    };
+
+    const renderRecent = (items) => {
+      const body = document.getElementById('recent-scans-body');
+      body.replaceChildren();
+      if (!items.length) {
+        const row = document.createElement('tr');
+        row.className = 'empty-row';
+        const cell = document.createElement('td');
+        cell.colSpan = 3;
+        cell.textContent = 'No bike scans for the current pallet yet.';
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      items.forEach((item) => {
+        const row = document.createElement('tr');
+        const time = document.createElement('td');
+        time.textContent = item.time;
+        const value = document.createElement('td');
+        const type = document.createElement('strong');
+        type.textContent = item.input_type;
+        value.append(type, document.createElement('br'), document.createTextNode(item.scanned_value));
+        if (item.resolved_code) {
+          const code = document.createElement('small');
+          code.textContent = item.resolved_code;
+          value.append(document.createElement('br'), code);
+        }
+        const result = document.createElement('td');
+        result.className = `scanner-result-${item.result}`;
+        result.textContent = item.message;
+        row.append(time, value, result);
+        body.appendChild(row);
+      });
+    };
+
+    const renderState = (nextState) => {
+      state = nextState;
+      clockBase = Date.now();
+      document.getElementById('container-total').textContent = state.current_total;
+      document.getElementById('container-expected').textContent = state.expected_total === null ? 'expected total unknown' : `of ${state.expected_total} expected`;
+      document.getElementById('current-pallet').textContent = state.current_pallet || 'Scan pallet first';
+      document.getElementById('pallet-total').textContent = state.pallet_total;
+      document.getElementById('pallet-expected').textContent = state.pallet_expected === null ? 'expected quantity unknown' : `of ${state.pallet_expected} expected`;
+      document.getElementById('completion-label').textContent = `${state.completion}%`;
+      document.getElementById('container-progress').value = state.completion;
+      document.getElementById('pallet-completion-label').textContent = state.pallet_expected === null ? 'Not available' : `${state.pallet_completion}%`;
+      document.getElementById('pallet-progress').value = state.pallet_completion;
+      renderRecent(state.recent);
+      if (state.last_scan) {
+        document.getElementById('last-scan-card').hidden = false;
+        document.getElementById('last-scanned-value').textContent = state.last_scan.scanned_value;
+        document.getElementById('last-resolved-code').textContent = state.last_scan.resolved_code || '—';
+        document.getElementById('last-long-code').textContent = state.last_scan.long_code || '—';
+        document.getElementById('last-pallet').textContent = state.last_scan.pallet || '—';
+        document.getElementById('last-message').textContent = state.last_scan.message;
+      }
+      renderTimers();
+    };
+
+    const scanForm = document.getElementById('continuous-scan-form');
+    if (scanForm) {
+      const input = document.getElementById('scanned-value');
+      const feedback = document.getElementById('scanner-feedback');
+      scanForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (!input.value.trim()) return;
+        const response = await fetch(scanForm.action || window.location.href, {
+          method: 'POST',
+          body: new FormData(scanForm),
+          headers: {'X-Requested-With': 'XMLHttpRequest'},
+          credentials: 'same-origin'
+        });
+        const payload = await response.json();
+        feedback.className = `scanner-feedback ${payload.level}`;
+        feedback.textContent = payload.message;
+        renderState(payload.state);
+        input.value = '';
+        input.focus();
+      });
+      input.focus();
+    }
+    const photoForm = document.getElementById('scanner-photo-form');
+    if (photoForm) {
+      photoForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const response = await fetch(photoForm.action || window.location.href, {
+          method: 'POST',
+          body: new FormData(photoForm),
+          headers: {'X-Requested-With': 'XMLHttpRequest'},
+          credentials: 'same-origin'
+        });
+        const payload = await response.json();
+        const feedback = document.getElementById('scanner-feedback');
+        feedback.className = `scanner-feedback ${payload.level}`;
+        feedback.textContent = payload.message;
+        renderState(payload.state);
+        if (payload.ok) photoForm.reset();
+        const scanInput = document.getElementById('scanned-value');
+        if (scanInput) scanInput.focus();
+      });
+    }
+    renderState(state);
+    window.setInterval(renderTimers, 1000);
+  })();
+  </script>
+  {% endif %}
+</div>
+{% endblock %}

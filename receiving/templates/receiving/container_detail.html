@@ -77,7 +77,10 @@
           <div class="compact-status-row">
             <span class="status-icon {% if workspace.received_batch %}ok{% else %}pending{% endif %}">{% if workspace.received_batch %}✓{% else %}○{% endif %}</span>
             <div><strong>First scan / received bikes</strong><small>{% if workspace.received_source %}{{ workspace.received_source.original_name }} · {{ workspace.received_batch.total_units }} received{% else %}Not confirmed{% endif %}</small>{% if workspace.received_source %}<small class="file-time-line"><b>Generated:</b> — (external file) · <b>Uploaded:</b> {{ workspace.received_source.uploaded_at|date:"d/m/Y H:i:s" }}</small>{% endif %}</div>
-            {% if workspace.received_source %}<a href="{% url 'receiving:configure_import' workspace.received_source.pk %}">Review</a>{% endif %}
+            <div class="actions">
+              {% if container.job_order and container.status != 'CLOSED' %}<a class="button primary compact" href="{% url 'receiving:first_scan_scanner' container.pk %}">Scan</a>{% endif %}
+              {% if workspace.received_source and not workspace.received_batch.mapping.scanner %}<a href="{% url 'receiving:configure_import' workspace.received_source.pk %}">Review</a>{% endif %}
+            </div>
           </div>
         </div>
 

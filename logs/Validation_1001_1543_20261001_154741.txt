@@ -1,0 +1,85 @@
+﻿Release 1001.1543 verification started 2026-10-01T15:47:41.2645727+09:30
+[PASS] Only the active installation is being verified.
+[PASS] .update_state metadata is locally excluded or legacy tracked; neither prevents the update.
+[PASS] Installed scanner payload matches the corrected package.
+[PASS] .git exists and git status works.
+[PASS] PostgreSQL backup and PRE_UPDATE_COMMIT.txt exist; no app backup was created.
+[PASS] Web completed entrypoint startup without restart or exit.
+
+--- django check ---
+System check identified no issues (0 silenced).
+
+[PASS] Django check passed.
+
+--- receiving migrations ---
+receiving
+ [X] 0001_initial
+ [X] 0002_product_catalog
+ [X] 0003_generatedexport_productdefinition
+ [X] 0004_container_container_date
+ [X] 0005_productcatalogentry_xml_metadata
+ [X] 0006_group1_family_mapping
+ [X] 0007_short_name_dictionary_rule
+ [X] 0008_stage2_product_moves
+ [X] 0009_client_receiving_report
+ [X] 0010_customer_product_catalog_configuration
+ [X] 0011_container_job_order
+ [X] 0012_product_master_xls
+ [X] 0013_multi_container_job_order
+ [X] 0014_alter_shortnamedictionaryrule_confidence_and_more
+ [X] 0015_original_import_selection
+ [X] 0016_first_scan_scanner
+
+[PASS] 0015 and 0016 are applied exactly once in migration state.
+
+--- migration state check ---
+No changes detected
+
+[PASS] No model changes are missing migrations.
+
+--- scanner tables ---
+missing= []
+
+[PASS] All four scanner tables exist.
+
+--- complete receiving test suite ---
+docker.exe : Creating test database for alias 'default'...
+At C:\Users\fabian\Downloads\PON_Bikes_Automation_Update_1001.1543\PON_Bikes_Automation_Update_1001.1543\04_Verify_Upda
+te.ps1:93 char:19
++ ...   $tests = (& docker compose exec -T web python manage.py test receiv ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Creating test d...as 'default'...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Found 87 test(s).
+System check identified no issues (0 silenced).
+................................................F......................................
+======================================================================
+FAIL: test_container_get_uses_persisted_state_with_only_targeted_pon_lookup 
+(receiving.tests.PbpToPonMigrationTests.test_container_get_uses_persisted_state_with_only_targeted_pon_lookup)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/app/receiving/tests.py", line 1111, in test_container_get_uses_persisted_state_with_only_targeted_pon_lookup
+    self.assertIn('"customer" like', sql)
+AssertionError: '"customer" like' not found in 'select "receiving_productcatalogentry"."id", 
+"receiving_productcatalogentry"."catalog_id", "receiving_productcatalogentry"."source_row", 
+"receiving_productcatalogentry"."code", "receiving_productcatalogentry"."pon_sku", 
+"receiving_productcatalogentry"."customer", "receiving_productcatalogentry"."code2", 
+"receiving_productcatalogentry"."short_name", "receiving_productcatalogentry"."long_name", 
+"receiving_productcatalogentry"."group1", "receiving_productcatalogentry"."group2", 
+"receiving_productcatalogentry"."raw_data" from "receiving_productcatalogentry" where 
+("receiving_productcatalogentry"."catalog_id" = 2 and upper("receiving_productcatalogentry"."customer"::text) = 
+upper(\'pon\') and ("receiving_productcatalogentry"."code" in (\'0l0cab111a48\') or 
+"receiving_productcatalogentry"."pon_sku" in (\'0l0cab111a48\') or "receiving_productcatalogentry"."code2" in 
+(\'0l0cab111a48\'))) order by "receiving_productcatalogentry"."source_row" asc, "receiving_productcatalogentry"."id" 
+asc'
+
+----------------------------------------------------------------------
+Ran 87 tests in 9.976s
+
+FAILED (failures=1)
+Destroying test database for alias 'default'...
+
+[FAIL] Complete receiving test suite failed.
+[PASS] Existing operational receiving row counts are unchanged.
+[PASS] HTTP responded on port 8001.

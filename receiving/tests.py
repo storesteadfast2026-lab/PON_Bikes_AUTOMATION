@@ -17,6 +17,7 @@ from django.core.files.base import ContentFile
 from django.test import TestCase, override_settings
 from django.db import IntegrityError, transaction
 from django.urls import reverse
+from django.utils import timezone
 from django.contrib.staticfiles import finders
 
 from openpyxl import Workbook, load_workbook
@@ -1838,3 +1839,282 @@ class ContinuitySnapshotStateTests(TestCase):
             "exports": GeneratedExport.objects.count(),
         }
         self.assertEqual(before, after)
+
+
+class FirstScanScannerTests(TestCase):
+    def setUp(self):
+        self.temp_media = tempfile.TemporaryDirectory()
+        self.override = override_settings(MEDIA_ROOT=self.temp_media.name)
+        self.override.enable()
+        self.user = get_user_model().objects.create_user(username="scanner", password="test-password")
+        self.client.force_login(self.user)
+        self.customer = Customer.objects.create(code="PON", name="Pon.Bike")
+        self.container = Container.objects.create(
+            identifier="SCANCONT01",
+            customer=self.customer,
+            container_date=date(2026, 10, 1),
+            year=2026,
+            job_order="SCAN-JO-001",
+            created_by=self.user,
+        )
+        source = SourceFile.objects.create(
+            container=self.container,
+            kind="CLIENT",
+            file=SimpleUploadedFile("client.xlsx", b"client"),
+            original_name="client.xlsx",
+            sha256="1" * 64,
+            status="CONFIRMED",
+            uploaded_by=self.user,
+        )
+        self.client_batch = ImportBatch.objects.create(
+            source_file=source,
+            status="CONFIRMED",
+            total_rows=2,
+            total_units=5,
+            confirmed_at=timezone.now(),
+            created_by=self.user,
+        )
+        NormalizedLine.objects.create(
+            batch=self.client_batch,
+            source_sheet="Client",
+            source_row=2,
+            code="BIKE-A",
+            long_code="LONG-A-0001",
+            quantity=3,
+            location="",
+        )
+        NormalizedLine.objects.create(
+            batch=self.client_batch,
+            source_sheet="Client",
+            source_row=3,
+            code="BIKE-B",
+            long_code="LONG-B-0002",
+            quantity=2,
+            location="",
+        )
+        self.url = reverse("receiving:first_scan_scanner", args=[self.container.pk])
+
+    def tearDown(self):
+        self.override.disable()
+        self.temp_media.cleanup()
+
+    def _start(self, mode="AUTO"):
+        from receiving.models import FirstScanSession
+        response = self.client.post(self.url, {"action": "start", "mode": mode})
+        self.assertEqual(response.status_code, 302)
+        return FirstScanSession.objects.get(container=self.container, status__in=["ACTIVE", "PAUSED"])
+
+    def _scan(self, value):
+        return self.client.post(
+            self.url,
+            {"action": "scan", "scanned_value": value},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+    def test_code_scan_registers_one_bike(self):
+        from receiving.models import FirstScanEvent
+        session = self._start("CODE")
+        self.assertEqual(self._scan("T1001").status_code, 200)
+        response = self._scan("BIKE-A")
+        self.assertEqual(response.status_code, 200)
+        line = session.batch.lines.get()
+        event = FirstScanEvent.objects.get(normalized_line=line)
+        self.assertEqual(line.code, "BIKE-A")
+        self.assertEqual(line.long_code, "LONG-A-0001")
+        self.assertEqual(event.input_type, "CODE")
+
+    def test_long_code_scan_resolves_product_code(self):
+        from receiving.models import FirstScanEvent
+        session = self._start("LONG_CODE")
+        self._scan("T1001")
+        response = self._scan("LONG-A-0001")
+        self.assertEqual(response.status_code, 200)
+        line = session.batch.lines.get()
+        self.assertEqual(line.code, "BIKE-A")
+        self.assertEqual(FirstScanEvent.objects.get(normalized_line=line).input_type, "LONG_CODE")
+
+    def test_auto_mode_resolves_code_and_long_code(self):
+        from receiving.models import FirstScanEvent
+        session = self._start("AUTO")
+        self._scan("T1001")
+        self.assertEqual(self._scan("BIKE-A").status_code, 200)
+        self.assertEqual(self._scan("LONG-B-0002").status_code, 200)
+        self.assertEqual(list(session.batch.lines.values_list("code", flat=True)), ["BIKE-A", "BIKE-B"])
+        self.assertEqual(
+            list(FirstScanEvent.objects.filter(event_type="BIKE").order_by("scanned_at").values_list("input_type", flat=True)),
+            ["CODE", "LONG_CODE"],
+        )
+
+    def test_pallet_scan_changes_current_pallet(self):
+        session = self._start()
+        first = self._scan("T1001")
+        self.assertEqual(first.status_code, 200)
+        session.refresh_from_db()
+        self.assertEqual(session.current_pallet, "T1001")
+        second = self._scan("T2002")
+        self.assertEqual(second.status_code, 200)
+        session.refresh_from_db()
+        self.assertEqual(session.current_pallet, "T2002")
+
+    def test_bike_is_assigned_to_current_pallet(self):
+        session = self._start()
+        self._scan("T4324")
+        self._scan("BIKE-A")
+        self.assertEqual(session.batch.lines.get().location, "T4324")
+
+    def test_continuous_scans_require_no_confirmation(self):
+        session = self._start()
+        self._scan("T4324")
+        first = self._scan("BIKE-A")
+        second = self._scan("BIKE-A")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(session.batch.lines.count(), 2)
+        self.assertEqual(second.json()["state"]["current_total"], 2)
+
+    def test_pause_resume_preserves_session_state_and_times(self):
+        from receiving.models import FirstScanPause, FirstScanSession
+        session = self._start()
+        self._scan("T4324")
+        self._scan("BIKE-A")
+        session_id = session.pk
+        pause = self.client.post(self.url, {"action": "pause"})
+        self.assertEqual(pause.status_code, 302)
+        session.refresh_from_db()
+        self.assertEqual(session.status, "PAUSED")
+        pause_record = FirstScanPause.objects.get(session=session)
+        self.assertIsNotNone(pause_record.started_at)
+        resume = self.client.post(self.url, {"action": "resume"})
+        self.assertEqual(resume.status_code, 302)
+        session.refresh_from_db()
+        pause_record.refresh_from_db()
+        self.assertEqual(session.pk, session_id)
+        self.assertEqual(session.status, "ACTIVE")
+        self.assertEqual(session.current_pallet, "T4324")
+        self.assertEqual(session.batch.lines.count(), 1)
+        self.assertIsNotNone(pause_record.resumed_at)
+        self.assertEqual(FirstScanSession.objects.filter(container=self.container).count(), 1)
+
+    def test_scan_and_finish_timestamps_are_stored(self):
+        from receiving.models import FirstScanEvent
+        session = self._start()
+        self._scan("T4324")
+        self._scan("BIKE-A")
+        event = FirstScanEvent.objects.get(event_type="BIKE", result="SUCCESS")
+        self.assertIsNotNone(session.started_at)
+        self.assertIsNotNone(event.scanned_at)
+        finish = self.client.post(self.url, {"action": "finish"})
+        self.assertEqual(finish.status_code, 302)
+        session.refresh_from_db()
+        self.assertEqual(session.status, "FINISHED")
+        self.assertIsNotNone(session.finished_at)
+
+    def test_container_and_current_pallet_counters_update(self):
+        self._start()
+        self._scan("T1001")
+        self._scan("BIKE-A")
+        self._scan("BIKE-A")
+        self._scan("T2002")
+        response = self._scan("BIKE-B")
+        state = response.json()["state"]
+        self.assertEqual(state["current_total"], 3)
+        self.assertEqual(state["pallet_total"], 1)
+        self.assertEqual(state["expected_total"], 5)
+        self.assertEqual(state["completion"], 60)
+
+    def test_scanner_records_feed_existing_first_scan_data(self):
+        from receiving.views import _stage2_data
+        session = self._start()
+        self._scan("T4324")
+        self._scan("BIKE-A")
+        received_batch, moves_import, reconciliation = _stage2_data(self.container)
+        self.assertEqual(received_batch.pk, session.batch_id)
+        self.assertEqual(received_batch.lines.get().code, "BIKE-A")
+        self.assertIsNone(moves_import)
+        self.assertIsNone(reconciliation)
+
+    def test_existing_manual_first_scan_batch_is_reused(self):
+        source = SourceFile.objects.create(
+            container=self.container,
+            kind="RECEIVED",
+            file=SimpleUploadedFile("manual.xlsx", b"manual"),
+            original_name="manual.xlsx",
+            sha256="2" * 64,
+            status="CONFIRMED",
+            uploaded_by=self.user,
+        )
+        manual_batch = ImportBatch.objects.create(
+            source_file=source,
+            status="CONFIRMED",
+            total_rows=1,
+            total_units=1,
+            confirmed_at=timezone.now(),
+            created_by=self.user,
+        )
+        NormalizedLine.objects.create(
+            batch=manual_batch,
+            source_sheet="Manual",
+            source_row=1,
+            code="BIKE-A",
+            long_code="LONG-A-0001",
+            quantity=1,
+            location="T1001",
+        )
+        session = self._start()
+        self.assertEqual(session.batch_id, manual_batch.pk)
+        self._scan("T1002")
+        self._scan("BIKE-B")
+        manual_batch.refresh_from_db()
+        self.assertEqual(manual_batch.total_units, 2)
+        self.assertEqual(manual_batch.lines.count(), 2)
+
+    def test_unknown_barcode_is_rejected_without_changing_counts(self):
+        from receiving.models import FirstScanEvent
+        session = self._start()
+        self._scan("T4324")
+        response = self._scan("UNKNOWN-999")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["ok"])
+        self.assertEqual(response.json()["level"], "error")
+        session.batch.refresh_from_db()
+        self.assertEqual(session.batch.total_units, 0)
+        self.assertEqual(session.batch.lines.count(), 0)
+        self.assertEqual(FirstScanEvent.objects.get(event_type="BIKE").result, "ERROR")
+
+    def test_photo_links_container_pallet_and_latest_scan_without_changing_counts(self):
+        from receiving.models import FirstScanPhoto
+        session = self._start()
+        self._scan("T4324")
+        self._scan("BIKE-A")
+        response = self.client.post(
+            self.url,
+            {
+                "action": "photo",
+                "photo": SimpleUploadedFile("label.jpg", b"\xff\xd8\xffevidence", content_type="image/jpeg"),
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        photo = FirstScanPhoto.objects.get()
+        self.assertEqual(photo.session.container, self.container)
+        self.assertEqual(photo.pallet, "T4324")
+        self.assertEqual(photo.event.resolved_code, "BIKE-A")
+        session.batch.refresh_from_db()
+        self.assertEqual(session.batch.total_units, 1)
+
+    def test_container_first_scan_section_has_scan_button(self):
+        response = self.client.get(reverse("receiving:container_detail", args=[self.container.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.url)
+        self.assertContains(response, ">Scan</a>")
+
+    def test_scanner_screen_renders_start_and_live_views(self):
+        start_page = self.client.get(self.url)
+        self.assertEqual(start_page.status_code, 200)
+        self.assertContains(start_page, "Start continuous scanning")
+        self.assertContains(start_page, "Current scanned total")
+        self._start()
+        live_page = self.client.get(self.url)
+        self.assertEqual(live_page.status_code, 200)
+        self.assertContains(live_page, 'id="continuous-scan-form"')
+        self.assertContains(live_page, "Pause Scan")
+        self.assertContains(live_page, "Take Photo")

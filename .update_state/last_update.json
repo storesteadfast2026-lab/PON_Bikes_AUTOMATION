@@ -1,13 +1,57 @@
 ﻿{
-    "release_version":  "1001.0900",
-    "prepared_at":  "2026-10-01T09:05:31.1487679+09:30",
-    "target_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation",
-    "previous_install_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation",
-    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_090529_before_1001.0900",
-    "database_backup":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_090529_before_1001.0900\\database_before_update.sql",
-    "first_stable_install":  false,
-    "git_existed_before":  true,
-    "pre_update_commit":  "90c8e63c7770447dd84a6f78d686aa13d0629257",
+    "release_version":  "1001.1543",
     "status":  "applied",
-    "applied_at":  "2026-10-01T09:05:45.9442578+09:30"
+    "started_at":  "2026-10-01T15:47:20.9506947+09:30",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_154719_before_update_1001.1543",
+    "database_backup":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_154719_before_update_1001.1543\\database_before_update.sql",
+    "pre_update_commit":  "1dbf7fd89678d34d3435a7afa2323139d4f6e533",
+    "operational_counts_before":  {
+                                      "receiving_appsetting":  10,
+                                      "receiving_container":  5,
+                                      "receiving_containerproductstatus":  245,
+                                      "receiving_customer":  1,
+                                      "receiving_generatedexport":  43,
+                                      "receiving_group1family":  8,
+                                      "receiving_importbatch":  19,
+                                      "receiving_importprofile":  2,
+                                      "receiving_normalizedline":  1780,
+                                      "receiving_productcatalog":  6,
+                                      "receiving_productcatalogentry":  53971,
+                                      "receiving_productdefinition":  43,
+                                      "receiving_productmovement":  1152,
+                                      "receiving_productmovesimport":  10,
+                                      "receiving_shortnamedictionaryrule":  301,
+                                      "receiving_sourcefile":  10
+                                  },
+    "replaced_files":  [
+                           "receiving\\models.py",
+                           "receiving\\templates\\receiving\\container_detail.html",
+                           "receiving\\tests.py",
+                           "receiving\\urls.py",
+                           "receiving\\views.py",
+                           "static\\css\\app.css"
+                       ],
+    "new_files":  [
+                      "receiving\\migrations\\0016_first_scan_scanner.py",
+                      "receiving\\templates\\receiving\\first_scan_scanner.html"
+                  ],
+    "applied_at":  "2026-10-01T15:47:32.5922533+09:30",
+    "operational_counts_after":  {
+                                     "receiving_appsetting":  10,
+                                     "receiving_container":  5,
+                                     "receiving_containerproductstatus":  245,
+                                     "receiving_customer":  1,
+                                     "receiving_generatedexport":  43,
+                                     "receiving_group1family":  8,
+                                     "receiving_importbatch":  19,
+                                     "receiving_importprofile":  2,
+                                     "receiving_normalizedline":  1780,
+                                     "receiving_productcatalog":  6,
+                                     "receiving_productcatalogentry":  53971,
+                                     "receiving_productdefinition":  43,
+                                     "receiving_productmovement":  1152,
+                                     "receiving_productmovesimport":  10,
+                                     "receiving_shortnamedictionaryrule":  301,
+                                     "receiving_sourcefile":  10
+                                 }
 }

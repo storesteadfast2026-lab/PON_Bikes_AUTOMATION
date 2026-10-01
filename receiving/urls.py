@@ -9,6 +9,7 @@ urlpatterns = [
     path("catalog/upload/", views.upload_product_catalog, name="upload_product_catalog"),
     path("catalog/sync/", views.sync_product_catalog, name="sync_product_catalog"),
     path("containers/<int:pk>/", views.container_detail, name="container_detail"),
+    path("containers/<int:pk>/first-scan/", views.first_scan_scanner, name="first_scan_scanner"),
     path("containers/<int:pk>/edit/", views.edit_container, name="edit_container"),
     path("containers/<int:pk>/upload/", views.upload_source, name="upload_source"),
     path("containers/<int:pk>/import-server/", views.import_server_source, name="import_server_source"),
