@@ -25,11 +25,21 @@
 {% endif %}
 
 <div class="metrics product-metrics">
-  <div class="metric"><span>Total units</span><strong>{{ summary.total_units }}</strong></div>
-  <div class="metric status-match"><span>Existing product rows</span><strong>{{ summary.existing_rows }}</strong></div>
-  <div class="metric status-migration"><span>PBP → PON rows</span><strong>{{ summary.pbp_to_pon_rows }}</strong></div>
-  <div class="metric status-unexpected"><span>New product rows</span><strong>{{ summary.new_rows }}</strong></div>
-  <div class="metric status-unexpected"><span>New units</span><strong>{{ summary.new_units }}</strong></div>
+  <div class="metric status-match">
+    <span>EXISTING PRODUCTS</span>
+    <strong>Original: {{ summary.original_existing_products }}</strong>
+    <strong>Current: {{ summary.current_existing_products }}</strong>
+  </div>
+  <div class="metric status-migration">
+    <span>PBP → PON PRODUCTS</span>
+    <strong>Original: {{ summary.original_pbp_to_pon_products }}</strong>
+    <strong>Current: {{ summary.current_pbp_to_pon_products }}</strong>
+  </div>
+  <div class="metric status-unexpected">
+    <span>NEW PRODUCTS</span>
+    <strong>Original: {{ summary.original_new_products }}</strong>
+    <strong>Current: {{ summary.current_new_products }}</strong>
+  </div>
 </div>
 
 {% if product_forms %}

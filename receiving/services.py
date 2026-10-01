@@ -569,13 +569,38 @@ def compare_products_to_catalog(received_lines, catalog_entries, target_customer
     return result
 
 
-def product_check_summary(rows):
+def product_check_summary(rows, original_classifications=None):
+    """Summarize unique products while keeping original and current decisions separate."""
+    current_by_code = {}
+    for row in rows:
+        code = str(row.get("code") or "").strip().upper()
+        if not code:
+            continue
+        classification = row.get("classification") or ""
+        if code not in current_by_code or not current_by_code[code]:
+            current_by_code[code] = classification
+
+    persisted = {
+        str(code or "").strip().upper(): classification or ""
+        for code, classification in (original_classifications or {}).items()
+    }
+    original_by_code = {
+        code: persisted.get(code, "")
+        for code in current_by_code
+    }
+
+    def count(classifications, value):
+        return sum(1 for classification in classifications.values() if classification == value)
+
     return {
-        "product_rows": len(rows),
+        "unique_products": len(current_by_code),
         "total_units": sum(row["count"] for row in rows),
-        "existing_rows": sum(1 for row in rows if row.get("classification") == "EXISTING"),
-        "pbp_to_pon_rows": sum(1 for row in rows if row.get("classification") == "PBP_TO_PON"),
-        "new_rows": sum(1 for row in rows if row.get("classification") == "NEW"),
+        "original_existing_products": count(original_by_code, "EXISTING"),
+        "original_pbp_to_pon_products": count(original_by_code, "PBP_TO_PON"),
+        "original_new_products": count(original_by_code, "NEW"),
+        "current_existing_products": count(current_by_code, "EXISTING"),
+        "current_pbp_to_pon_products": count(current_by_code, "PBP_TO_PON"),
+        "current_new_products": count(current_by_code, "NEW"),
         "existing_units": sum(row["count"] for row in rows if row.get("classification") == "EXISTING"),
         "pbp_to_pon_units": sum(row["count"] for row in rows if row.get("classification") == "PBP_TO_PON"),
         "new_units": sum(row["count"] for row in rows if row.get("classification") == "NEW"),

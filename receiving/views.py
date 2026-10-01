@@ -1940,7 +1940,11 @@ def _persisted_product_check_data(container, received_batch=None):
             "definition": definitions.get(row["code"]),
         })
     rows.sort(key=lambda row: (row["location"], row["code"]))
-    return catalog, received_batch, rows, product_check_summary(rows)
+    original_classifications = {
+        code: state.import_classification
+        for code, state in states.items()
+    }
+    return catalog, received_batch, rows, product_check_summary(rows, original_classifications)
 
 
 def _original_import_rows(container, rows, recover=True):
@@ -2008,6 +2012,41 @@ def _original_import_rows(container, rows, recover=True):
     return result
 
 
+def _prefer_current_pon_data(catalog, migration_rows_by_code):
+    """Use the current PON row without changing historical classification."""
+    if not catalog or not migration_rows_by_code:
+        return
+    codes = set(migration_rows_by_code)
+    entries = ProductCatalogEntry.objects.filter(
+        catalog=catalog,
+        customer__iexact="PON",
+    ).filter(
+        Q(code__in=codes) | Q(pon_sku__in=codes) | Q(code2__in=codes)
+    ).order_by("source_row", "pk")
+    preferred = {}
+    for entry in entries:
+        for value in (entry.code, entry.pon_sku, entry.code2):
+            normalized = str(value or "").strip().upper()
+            if normalized in codes:
+                preferred.setdefault(normalized, entry)
+
+    for code, row in migration_rows_by_code.items():
+        entry = preferred.get(code)
+        if not entry:
+            continue
+        pon_data = pbp_to_pon_product_data({
+            "is_pbp_to_pon": True,
+            "code": code,
+            "catalog_code": entry.code,
+            "catalog_pon_sku": entry.pon_sku,
+            "catalog_code2": entry.code2,
+            "catalog_short_name": entry.short_name,
+            "catalog_long_name": entry.long_name,
+            "catalog_raw_data": dict(entry.raw_data or {}),
+        })
+        row["pbp_to_pon_data"] = pon_data
+
+
 def _product_check_data(container):
     catalog = _active_catalog_for_customer(container.customer)
     received_batch = ImportBatch.objects.filter(
@@ -2065,7 +2104,13 @@ def _product_check_data(container):
         ContainerProductStatus.objects.bulk_update(list(updated.values()), ["import_history"])
         # Recover legacy decisions only during explicit classification.
         _original_import_rows(container, rows)
-    return catalog, received_batch, rows, product_check_summary(rows)
+    product_codes = {row["code"] for row in rows}
+    original_classifications = dict(
+        container.product_statuses.filter(code__in=product_codes).values_list(
+            "code", "import_classification"
+        )
+    )
+    return catalog, received_batch, rows, product_check_summary(rows, original_classifications)
 
 
 @login_required
@@ -2246,6 +2291,7 @@ def export_new_products(request, pk):
     rows = _original_import_rows(container, rows)
     new_rows_by_code = {row["code"]: row for row in rows if row["is_new"]}
     migration_rows_by_code = {row["code"]: row for row in rows if row.get("is_pbp_to_pon")}
+    _prefer_current_pon_data(catalog, migration_rows_by_code)
     import_codes = sorted(set(new_rows_by_code) | set(migration_rows_by_code))
     definition_required_codes = sorted(
         set(new_rows_by_code)
@@ -2356,4 +2402,3 @@ def export_new_products(request, pk):
     response = HttpResponse(content, content_type=content_type)
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
-

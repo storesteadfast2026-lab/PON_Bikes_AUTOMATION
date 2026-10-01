@@ -38,6 +38,7 @@ from .services import (
     normalize_container_identifier,
     parse_product_catalog,
     parse_product_moves_csv,
+    product_check_summary,
     reconcile_product_movements,
     resolve_group1_family,
     suggest_mapping,
@@ -798,10 +799,71 @@ class PbpToPonMigrationTests(TestCase):
         row = response.context["rows"][0]
         self.assertEqual(row["status"], "PBP → PON")
         self.assertTrue(row["pbp_to_pon_data"]["valid"])
-        self.assertEqual(response.context["summary"]["new_rows"], 0)
-        self.assertEqual(response.context["summary"]["pbp_to_pon_rows"], 1)
+        self.assertEqual(response.context["summary"]["current_new_products"], 0)
+        self.assertEqual(response.context["summary"]["current_pbp_to_pon_products"], 1)
+        self.assertEqual(response.context["summary"]["original_pbp_to_pon_products"], 1)
         self.assertEqual(response.context["product_forms"], [])
         self.assertContains(response, "PBP → PON")
+
+    def test_product_check_summary_counts_unique_codes(self):
+        rows = [
+            {"code": "EXISTING-1", "location": "A", "count": 1, "classification": "EXISTING"},
+            {"code": "existing-1", "location": "B", "count": 2, "classification": "EXISTING"},
+            {"code": "PBP-1", "location": "A", "count": 1, "classification": "PBP_TO_PON"},
+            {"code": "NEW-1", "location": "A", "count": 1, "classification": "NEW"},
+        ]
+        summary = product_check_summary(rows, {
+            "EXISTING-1": "PBP_TO_PON",
+            "PBP-1": "NEW",
+            "NEW-1": "EXISTING",
+        })
+
+        self.assertEqual(summary["unique_products"], 3)
+        self.assertEqual(summary["current_existing_products"], 1)
+        self.assertEqual(summary["current_pbp_to_pon_products"], 1)
+        self.assertEqual(summary["current_new_products"], 1)
+        self.assertEqual(summary["original_existing_products"], 1)
+        self.assertEqual(summary["original_pbp_to_pon_products"], 1)
+        self.assertEqual(summary["original_new_products"], 1)
+
+    def test_product_check_preserves_original_classification_when_current_changes(self):
+        from receiving.views import _product_check_data
+
+        _product_check_data(self.container)
+        state = self.container.product_statuses.get(code=self.SKU)
+        self.assertEqual(state.import_classification, "PBP_TO_PON")
+
+        NormalizedLine.objects.create(
+            batch=self.batch, source_sheet="Sheet1", source_row=3,
+            code=self.SKU, quantity=1, location="T9999",
+        )
+        self._add_current_pon(self.SKU)
+
+        response = self.client.get(reverse("receiving:product_check", args=[self.container.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["rows"]), 2)
+        summary = response.context["summary"]
+        self.assertEqual(summary["unique_products"], 1)
+        self.assertEqual(summary["original_pbp_to_pon_products"], 1)
+        self.assertEqual(summary["original_existing_products"], 0)
+        self.assertEqual(summary["current_existing_products"], 1)
+        self.assertEqual(summary["current_pbp_to_pon_products"], 0)
+        self.assertContains(response, "EXISTING PRODUCTS")
+        self.assertContains(response, "PBP → PON PRODUCTS")
+        self.assertContains(response, "NEW PRODUCTS")
+        self.assertNotContains(response, "Existing product rows")
+        self.assertNotContains(response, "PBP → PON rows")
+        self.assertNotContains(response, "New product rows")
+
+        state.refresh_from_db()
+        self.assertEqual(state.import_classification, "PBP_TO_PON")
+
+        export = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
+        self.assertEqual(export.status_code, 200)
+        sheet = load_workbook(BytesIO(export.content), data_only=True)["New Product Import"]
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet["A2"].value, self.SKU)
+        self.assertTrue(all(cell.fill.fgColor.rgb == "FFF4B183" for cell in sheet[2]))
 
     def test_pbp_to_pon_is_included_in_existing_new_product_import_workflow(self):
         response = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
@@ -830,7 +892,24 @@ class PbpToPonMigrationTests(TestCase):
     def _add_current_pon(self, code):
         return ProductCatalogEntry.objects.create(
             catalog=self.catalog, source_row=20, code=code, pon_sku=code,
-            customer="PON", short_name="Changed master name", long_name="Changed master name",
+            customer="PON", code2=code,
+            short_name="C26 CALEDONIA 105 MOCHA 48",
+            long_name="C26 CALEDONIA 105 MOCHA 48",
+            group1="PONCVL",
+            raw_data={
+                "code": code,
+                "pon_sku": code,
+                "customer": "PON",
+                "code2": code,
+                "short_name": "C26 CALEDONIA 105 MOCHA 48",
+                "long_name": "C26 CALEDONIA 105 MOCHA 48",
+                "group1": "PONCVL",
+                "cubic": "0.252",
+                "weight": "15.63",
+                "height": "750",
+                "width": "250",
+                "length": "1340",
+            },
         )
 
     def test_import_retains_pbp_selection_and_values_after_pon_sync(self):
@@ -842,11 +921,70 @@ class PbpToPonMigrationTests(TestCase):
         self.assertEqual(second.status_code, 200)
         before = load_workbook(BytesIO(first.content), data_only=True).active
         after = load_workbook(BytesIO(second.content), data_only=True).active
-        self.assertEqual(list(before.values), list(after.values))
+        self.assertNotEqual(list(before.values), list(after.values))
+        self.assertEqual(after["T2"].value, 0.252)
+        self.assertEqual(after["U2"].value, 15.63)
+        self.assertEqual(after["V2"].value, 750)
+        self.assertEqual(after["W2"].value, 250)
+        self.assertEqual(after["X2"].value, 1340)
         for cell in after[2]:
             self.assertEqual(cell.fill.fgColor.rgb, "FFF4B183")
         from receiving.views import _container_workspace_data
         self.assertTrue(_container_workspace_data(self.container)["new_product_import_download_ready"])
+
+    def test_valid_pon_row_wins_data_without_changing_historical_pbp_classification(self):
+        self.client.get(reverse("receiving:product_check", args=[self.container.pk]))
+        state = self.container.product_statuses.get(code=self.SKU)
+        original_history = dict(state.import_history)
+        self.assertEqual(state.import_classification, "PBP_TO_PON")
+
+        ProductCatalogEntry.objects.create(
+            catalog=self.catalog,
+            source_row=20,
+            code=self.SKU,
+            pon_sku=self.SKU,
+            customer="PON",
+            code2=self.SKU,
+            short_name="C26 CALEDONIA 105 MOCHA 48",
+            long_name="C26 CALEDONIA 105 MOCHA 48",
+            group1="PONCVL",
+            group2="",
+            raw_data={
+                "code": self.SKU,
+                "pon_sku": self.SKU,
+                "customer": "PON",
+                "code2": self.SKU,
+                "short_name": "C26 CALEDONIA 105 MOCHA 48",
+                "long_name": "C26 CALEDONIA 105 MOCHA 48",
+                "group1": "PONCVL",
+                "group2": "",
+                "cubic": "0.252",
+                "weight": "15.63",
+                "height": "750",
+                "width": "250",
+                "length": "1340",
+            },
+        )
+
+        response = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        sheet = load_workbook(BytesIO(response.content), data_only=True)["New Product Import"]
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet["A2"].value, self.SKU)
+        self.assertEqual(sheet["J2"].value, "PONCVL")
+        self.assertIsNone(sheet["K2"].value)
+        self.assertEqual(sheet["T2"].value, 0.252)
+        self.assertEqual(sheet["U2"].value, 15.63)
+        self.assertEqual(sheet["V2"].value, 750)
+        self.assertEqual(sheet["W2"].value, 250)
+        self.assertEqual(sheet["X2"].value, 1340)
+        self.assertTrue(all(cell.fill.fgColor.rgb == "FFF4B183" for cell in sheet[2]))
+        self.assertFalse(ProductDefinition.objects.filter(code=self.SKU).exists())
+
+        state.refresh_from_db()
+        self.assertEqual(state.import_classification, "PBP_TO_PON")
+        self.assertEqual(state.import_history, original_history)
 
     def test_truly_new_retains_original_import_membership(self):
         from receiving.views import _product_check_data, _original_import_rows
@@ -885,7 +1023,13 @@ class PbpToPonMigrationTests(TestCase):
                                               original_name="new-master.xml", sha256="d" * 64,
                                               active=True, uploaded_by=self.user)
         ProductCatalogEntry.objects.create(catalog=newer, source_row=1, code=self.SKU,
-                                          pon_sku=self.SKU, customer="PON")
+                                          pon_sku=self.SKU, code2=self.SKU, customer="PON",
+                                          short_name="C26 CALEDONIA 105 MOCHA 48",
+                                          long_name="C26 CALEDONIA 105 MOCHA 48", group1="PONCVL",
+                                          raw_data={
+                                              "cubic": "0.252", "weight": "15.63",
+                                              "height": "750", "width": "250", "length": "1340",
+                                          })
         response = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
         self.assertEqual(response.status_code, 200)
         state = self.container.product_statuses.get(code=self.SKU)
