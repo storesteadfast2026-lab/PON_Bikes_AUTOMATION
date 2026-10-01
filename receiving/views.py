@@ -690,8 +690,12 @@ def _container_workspace_data(container):
     catalog, _, product_rows, product_summary = _persisted_product_check_data(container, received_batch)
     import_rows = _original_import_rows(container, product_rows, recover=False)
     new_codes = sorted({row["code"] for row in import_rows if row["is_new"]})
-    migration_rows = [row for row in import_rows if row.get("is_pbp_to_pon")]
-    migration_codes = sorted({row["code"] for row in migration_rows})
+    migration_rows_by_code = {
+        row["code"]: row for row in import_rows if row.get("is_pbp_to_pon")
+    }
+    _prefer_current_pon_data(catalog, migration_rows_by_code)
+    migration_rows = list(migration_rows_by_code.values())
+    migration_codes = sorted(migration_rows_by_code)
     definition_required_codes = sorted(
         set(new_codes)
         | {row["code"] for row in migration_rows if not (row.get("pbp_to_pon_data") or {}).get("valid")}

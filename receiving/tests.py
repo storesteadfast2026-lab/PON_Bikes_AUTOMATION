@@ -986,6 +986,42 @@ class PbpToPonMigrationTests(TestCase):
         self.assertEqual(state.import_classification, "PBP_TO_PON")
         self.assertEqual(state.import_history, original_history)
 
+    def test_readiness_uses_current_pon_when_historical_pbp_data_is_incomplete(self):
+        from receiving.models import ContainerProductStatus
+        from receiving.views import _container_workspace_data
+
+        state = ContainerProductStatus.objects.create(
+            container=self.container,
+            code=self.SKU,
+            was_new=False,
+            import_classification="PBP_TO_PON",
+            import_history={"valid": False, "missing": ["cubic", "weight", "height", "width", "length"]},
+        )
+        self._add_current_pon(self.SKU)
+        self.pbp_entry.delete()
+
+        workspace = _container_workspace_data(self.container)
+        self.assertEqual(workspace["pending_new_codes"], [])
+        self.assertTrue(workspace["new_product_import_download_ready"])
+
+        page = self.client.get(reverse("receiving:container_detail", args=[self.container.pk]))
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "Download New Product Import")
+        self.assertNotContains(page, "still require Long Name, Short Name, Group1 and dimensions")
+
+        export = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
+        self.assertEqual(export.status_code, 200)
+        sheet = load_workbook(BytesIO(export.content), data_only=True)["New Product Import"]
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet["A2"].value, self.SKU)
+        self.assertEqual(sheet["J2"].value, "PONCVL")
+        self.assertEqual(sheet["T2"].value, 0.252)
+        self.assertEqual(sheet["U2"].value, 15.63)
+
+        state.refresh_from_db()
+        self.assertEqual(state.import_classification, "PBP_TO_PON")
+        self.assertFalse(state.import_history["valid"])
+
     def test_truly_new_retains_original_import_membership(self):
         from receiving.views import _product_check_data, _original_import_rows
         code = "TRULY-NEW"
@@ -1049,7 +1085,7 @@ class PbpToPonMigrationTests(TestCase):
         self.assertTrue(_original_import_rows(self.container, rows)[0]["is_pbp_to_pon"])
         self.assertFalse(_original_import_rows(other, rows)[0]["is_pbp_to_pon"])
 
-    def test_container_get_uses_persisted_state_without_catalog_work_or_writes(self):
+    def test_container_get_uses_persisted_state_with_only_targeted_pon_lookup(self):
         from receiving.views import _product_check_data
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
@@ -1063,10 +1099,17 @@ class PbpToPonMigrationTests(TestCase):
                 response = self.client.get(reverse("receiving:container_detail", args=[self.container.pk]))
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.context["workspace"]["new_product_import_download_ready"])
+        catalog_queries = []
         for query in queries:
             sql = query["sql"].lower()
-            self.assertNotIn("receiving_productcatalogentry", sql)
+            if "receiving_productcatalogentry" in sql:
+                catalog_queries.append(sql)
             self.assertFalse(sql.lstrip().startswith(("insert", "update", "delete")))
+        self.assertEqual(len(catalog_queries), 2)
+        for sql in catalog_queries:
+            self.assertIn('"customer" like', sql)
+            self.assertIn('"code" in', sql)
+            self.assertIn(self.SKU.lower(), sql)
 
     def test_legacy_container_get_does_not_rebuild_history(self):
         from receiving.models import ContainerProductStatus
