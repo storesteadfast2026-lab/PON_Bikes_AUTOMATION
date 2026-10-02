@@ -10,7 +10,7 @@ const template = fs.readFileSync(path.join(__dirname, '../templates/receiving/fi
 const script = template.match(/<script>\s*([\s\S]*?)\s*<\/script>/)[1];
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-function scanner() {
+function scanner({actionAttribute = '/containers/12/first-scan/'} = {}) {
   const nodes = new Map();
   let focused;
   const node = (id) => {
@@ -18,7 +18,10 @@ function scanner() {
       listeners: {}, value: '', textContent: '', disabled: false, readOnly: false,
       addEventListener(type, handler) { this.listeners[type] = handler; },
       focus() { focused = id; }, select() { this.selected = true; },
-      replaceChildren() {}, appendChild() {}, append() {},
+      children: [],
+      replaceChildren() { this.children = []; },
+      appendChild(child) { this.children.push(child); },
+      append(...children) { this.children.push(...children); },
     });
     return nodes.get(id);
   };
@@ -26,6 +29,9 @@ function scanner() {
   const form = node('continuous-scan-form');
   const button = node('register-button');
   form.querySelector = () => button;
+  // HTMLFormElement.action is shadowed by the hidden input named "action".
+  form.action = {toString() { return '[object HTMLInputElement]'; }};
+  form.getAttribute = (name) => name === 'action' ? actionAttribute : null;
   const state = {
     status: 'ACTIVE', elapsed_seconds: 0, paused_seconds: 0, active_seconds: 0,
     current_total: 0, expected_total: 10, current_pallet: '', pallet_total: 0,
@@ -40,12 +46,17 @@ function scanner() {
     Date, JSON,
     document: {
       getElementById(id) { return id === 'scanner-photo-form' ? null : node(id); },
-      createElement() { return {append() {}, appendChild() {}}; },
+      createElement() { return {children: [], textContent: '',
+        append(...children) { this.children.push(...children); },
+        appendChild(child) { this.children.push(child); }}; },
       createTextNode(value) { return value; },
     },
-    window: {location: {href: '/containers/1/first-scan/'}, setInterval() {}},
+    window: {location: {href: '/containers/12/first-scan/'}, setInterval() {}},
     FormData: class { constructor() { this.value = input.value; } },
     async fetch(url, options) {
+      assert.equal(typeof url, 'string');
+      assert.equal(url, '/containers/12/first-scan/');
+      assert.ok(!url.includes('[object HTMLInputElement]'));
       requests.push({url, options, value: options.body.value});
       if (gate) await gate;
       if (failNetwork) throw new Error('network unavailable');
@@ -67,6 +78,7 @@ function scanner() {
         result, message: result, time: '12:00:00'};
       events.push(event);
       state.last_scan = event;
+      state.recent = events.filter(item => item.resolved_code && item.pallet === state.current_pallet).slice(-10).reverse();
       return {json: async () => ({ok: result === 'SUCCESS', level: result.toLowerCase(),
         message: result, state: JSON.parse(JSON.stringify(state))})};
     },
@@ -94,6 +106,7 @@ test('Enter registers a pallet and updates the displayed current pallet', async 
   assert.equal(s.events.length, 1);
   assert.equal(s.node('current-pallet').textContent, 'T2525');
   assert.equal(s.requests[0].options.headers['X-Requested-With'], 'XMLHttpRequest');
+  assert.equal(s.requests[0].url, '/containers/12/first-scan/');
 });
 
 for (const [value, type] of [['BIKE-A', 'CODE'], ['LONG-A-0001', 'LONG_CODE']]) {
@@ -105,6 +118,9 @@ for (const [value, type] of [['BIKE-A', 'CODE'], ['LONG-A-0001', 'LONG_CODE']]) 
     assert.equal(s.events.at(-1).pallet, 'T2525');
     assert.equal(s.node('container-total').textContent, 1);
     assert.equal(s.node('pallet-total').textContent, 1);
+    assert.equal(s.node('recent-scans-body').children.length, 1);
+    const recentValue = s.node('recent-scans-body').children[0].children[1];
+    assert.ok(recentValue.children.includes(value));
   });
 }
 
@@ -114,7 +130,18 @@ test('manual button form submit remains a fallback', async () => {
   await settle();
   assert.equal(s.events.length, 1);
   assert.equal(s.events[0].scanned_value, 'T2525');
+  assert.equal(s.requests[0].url, '/containers/12/first-scan/');
   assert.match(template, /type="submit">Register scan<\/button>/);
+});
+
+test('missing action attribute falls back to current URL despite the named action input', async () => {
+  const s = scanner({actionAttribute: null});
+  s.enter('T2525'); await settle();
+  assert.equal(s.requests.length, 1);
+  assert.equal(s.events.length, 1);
+  assert.equal(s.requests[0].url, '/containers/12/first-scan/');
+  assert.equal(s.input.value, '');
+  assert.equal(s.focused(), 'scanned-value');
 });
 
 test('Enter plus submit and repeated keydown make exactly one request/event', async () => {

@@ -217,6 +217,7 @@
       const input = document.getElementById('scanned-value');
       const feedback = document.getElementById('scanner-feedback');
       const button = scanForm.querySelector('button[type="submit"]');
+      const scanEndpointUrl = scanForm.getAttribute('action') || window.location.href;
       let registering = false;
       const registerScan = async () => {
         if (registering || !input.value.trim()) return;
@@ -224,7 +225,7 @@
         input.readOnly = true;
         button.disabled = true;
         try {
-          const response = await fetch(scanForm.action || window.location.href, {
+          const response = await fetch(scanEndpointUrl, {
             method: 'POST',
             body: new FormData(scanForm),
             headers: {'X-Requested-With': 'XMLHttpRequest'},

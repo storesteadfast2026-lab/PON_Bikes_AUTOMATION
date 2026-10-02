@@ -1,10 +1,10 @@
 ﻿{
-    "release_version":  "1001.1616",
+    "release_version":  "1001.1639",
     "status":  "applied",
-    "started_at":  "2026-10-01T16:26:26.3858094+09:30",
-    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_162625_before_update_1001.1616",
-    "database_backup":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_162625_before_update_1001.1616\\database_before_update.sql",
-    "pre_update_commit":  "bea63237fc96a6bea6ddec8c0d4f5f8dcd741127",
+    "started_at":  "2026-10-01T16:45:21.7582027+09:30",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_164520_before_update_1001.1639",
+    "database_backup":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261001_164520_before_update_1001.1639\\database_before_update.sql",
+    "pre_update_commit":  "12dd29a397849f9346e3392096a1fc68969b9c32",
     "operational_counts_before":  {
                                       "receiving_appsetting":  10,
                                       "receiving_container":  6,
@@ -24,12 +24,13 @@
                                       "receiving_sourcefile":  11
                                   },
     "replaced_files":  [
-                           "receiving\\templates\\receiving\\first_scan_scanner.html"
+                           "receiving\\templates\\receiving\\first_scan_scanner.html",
+                           "receiving\\tests_js\\first_scan_enter.test.cjs"
                        ],
     "new_files":  [
-                      "receiving\\tests_js\\first_scan_enter.test.cjs"
+
                   ],
-    "applied_at":  "2026-10-01T16:26:38.3157082+09:30",
+    "applied_at":  "2026-10-01T16:45:33.2413782+09:30",
     "operational_counts_after":  {
                                      "receiving_appsetting":  10,
                                      "receiving_container":  6,
