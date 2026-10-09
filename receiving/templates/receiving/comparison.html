@@ -33,7 +33,7 @@
 <section class="card">
   <h2>Comparison by product code</h2>
   <div class="table-wrap"><table><thead><tr><th>Code</th><th>Advised</th><th>Received</th><th>Variance</th><th>Status</th></tr></thead><tbody>
-  {% for row in rows %}<tr class="status-{{ row.status|lower }}"><td><code>{{ row.code }}</code></td><td>{{ row.expected }}</td><td>{{ row.received }}</td><td>{{ row.difference }}</td><td><span class="badge">{{ row.status }}</span></td></tr>{% empty %}<tr><td colspan="5">No confirmed information is available.</td></tr>{% endfor %}
+  {% for row in rows %}<tr class="status-{{ row.status|lower }}"><td><code>{{ row.code }}</code>{% if row.sections %}<br><small>Section: {{ row.sections|join:", " }}</small>{% endif %}{% if row.source_rows %}<br><small>Manifest row{{ row.source_rows|length|pluralize }}: {{ row.source_rows|join:", " }}</small>{% endif %}</td><td>{{ row.expected }}</td><td>{{ row.received }}</td><td>{{ row.difference }}</td><td><span class="badge">{{ row.status }}</span>{% if row.warning %}<br><small>{{ row.warning }}</small>{% endif %}</td></tr>{% empty %}<tr><td colspan="5">No confirmed information is available.</td></tr>{% endfor %}
   </tbody></table></div>
 </section>
 {% endblock %}

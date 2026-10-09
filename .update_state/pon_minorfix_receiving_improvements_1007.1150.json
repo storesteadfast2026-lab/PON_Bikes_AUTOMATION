@@ -1,0 +1,16 @@
+﻿{
+    "version":  "1007.1150",
+    "status":  "APPLIED",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261007_115645_before_receiving_improvements_e3639d92",
+    "updated_at":  "2026-10-07T11:57:13.9168399+10:30",
+    "files":  [
+                  "receiving\\forms.py",
+                  "receiving\\services.py",
+                  "receiving\\views.py",
+                  "receiving\\tests.py",
+                  "receiving\\test_first_scan_two_codes.py",
+                  "receiving\\templates\\receiving\\configure_import.html",
+                  "receiving\\templates\\receiving\\first_scan_scanner.html",
+                  "receiving\\tests_js\\source_preview.test.cjs"
+              ]
+}

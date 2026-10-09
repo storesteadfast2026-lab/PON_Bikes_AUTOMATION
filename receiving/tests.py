@@ -39,11 +39,13 @@ from .services import (
     normalize_container_identifier,
     parse_product_catalog,
     parse_product_moves_csv,
+    parse_workbook,
     product_check_summary,
     reconcile_product_movements,
     resolve_group1_family,
     suggest_mapping,
     suggest_translogic_name,
+    summarize_import_rows,
 )
 from .translogic_transfer import copy_file_verified, discover_numbered_import_set
 
@@ -127,6 +129,7 @@ class LoginPresentationTests(TestCase):
 
     def test_main_stylesheet_is_discoverable(self):
         self.assertIsNotNone(finders.find("css/app.css"))
+
 
     def test_short_name_suggestion_preserves_model_colour_and_size(self):
         self.assertEqual(
@@ -262,6 +265,8 @@ class LoginPresentationTests(TestCase):
             }
         )
         self.assertTrue(form.is_valid(), form.errors)
+        for field_name in ("long_code", "short_name", "full_name"):
+            self.assertFalse(form.fields[field_name].disabled)
         product = form.save(commit=False)
         self.assertEqual(product.length_mm, 2005)
         self.assertEqual(product.height_mm, 1180)
@@ -332,11 +337,11 @@ class LoginPresentationTests(TestCase):
         self.assertEqual(check["E3"].value, "New")
         self.assertEqual(
             [check[f"{column}1"].value for column in ("F", "G", "H")],
-            ["Length (cm)", "Width (cm)", "Height (cm)"],
+            ["Length (cm)", "Height (cm)", "Width (cm)"],
         )
         self.assertEqual(check["F3"].value, 160.0)
-        self.assertEqual(check["G3"].value, 35.0)
-        self.assertEqual(check["H3"].value, 90.0)
+        self.assertEqual(check["G3"].value, 90.0)
+        self.assertEqual(check["H3"].value, 35.0)
         self.assertEqual(check["I3"].value, 18.5)
         self.assertEqual(check.column_dimensions["A"].width, 15)
         self.assertEqual(check.column_dimensions["C"].width, 7)
@@ -447,6 +452,91 @@ class ProductCatalogWorkflowTests(TestCase):
         self.assertEqual(response.context["saved_definition_count"], 0)
         self.assertEqual(response.context["pending_definition_count"], 1)
 
+    def test_new_physical_code_reuses_manifest_long_code_description_and_group1(self):
+        upload = SimpleUploadedFile("products_pon_pbp_auto.xml", self._catalog_bytes(), content_type="application/xml")
+        self.client.post(reverse("receiving:upload_product_catalog"), {"file": upload, "customer_id": self.customer.pk})
+
+        received_line = self.batch.lines.get(code="NEW-001")
+        received_line.code = "192219528861"
+        received_line.long_code = "58-27324-334-6-948-184701"
+        received_line.quantity = 1
+        received_line.save(update_fields=["code", "long_code", "quantity"])
+
+        manifest_book = Workbook()
+        manifest_sheet = manifest_book.active
+        manifest_sheet.title = "Packing List"
+        manifest_sheet.append(["", "Santa Cruz - Article Number", "Description", "QTY ADVISED"])
+        manifest_sheet.append(["", "58-27324-334-6-948-184701", "TB 6 CC 29 27 XXL VIO GX AXS", 1])
+        manifest_bytes = BytesIO()
+        manifest_book.save(manifest_bytes)
+
+        manifest_source = SourceFile.objects.create(
+            container=self.container,
+            kind="CLIENT",
+            file=SimpleUploadedFile(
+                "santa-cruz-manifest.xlsx",
+                manifest_bytes.getvalue(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            original_name="santa-cruz-manifest.xlsx",
+            sha256="d" * 64,
+            status="CONFIRMED",
+            uploaded_by=self.user,
+        )
+        manifest_batch = ImportBatch.objects.create(
+            source_file=manifest_source,
+            status="CONFIRMED",
+            mapping={
+                "sheet_name": "Packing List",
+                "start_row": 2,
+                "start_column": "A",
+                "code_column": "",
+                "long_code_column": "B",
+                "description_column": "C",
+                "quantity_column": "D",
+                "_header_row": 1,
+            },
+            total_rows=1,
+            total_units=1,
+            created_by=self.user,
+        )
+        NormalizedLine.objects.create(
+            batch=manifest_batch,
+            source_sheet="Packing List",
+            source_row=2,
+            code="58-27324-334-6-948-184701",
+            long_code="58-27324-334-6-948-184701",
+            description="TB 6 CC 29 27 XXL VIO GX AXS",
+            quantity=1,
+            raw_data={"_manifest_section": "E-BIKES"},
+        )
+        Group1Family.objects.update_or_create(
+            family_name="Santa Cruz",
+            defaults={
+                "suffix": "SCZ",
+                # Deliberately do not match the abbreviated bike description.
+                # Group1 must come from the Manifest header family context.
+                "match_phrases": "Santa Cruz\nSkitch",
+                "priority": 100,
+                "active": True,
+            },
+        )
+
+        response = self.client.get(reverse("receiving:product_check", args=[self.container.pk]))
+        self.assertEqual(response.status_code, 200)
+        row = next(item for item in response.context["rows"] if item["code"] == "192219528861")
+        self.assertEqual(row["long_code"], "58-27324-334-6-948-184701")
+        self.assertEqual(row["description"], "TB 6 CC 29 27 XXL VIO GX AXS")
+        self.assertEqual(row["manifest_section"], "E-BIKES")
+
+        product = next(item for item in response.context["product_forms"] if item["row"]["code"] == "192219528861")
+        self.assertEqual(product["form"]["full_name"].value(), "TB 6 CC 29 27 XXL VIO GX AXS")
+        self.assertNotEqual(product["form"]["short_name"].value(), "192219528861")
+        self.assertEqual(product["group1"], "PONSCZ")
+        self.assertEqual(product["group1_family"], "Santa Cruz")
+        self.assertEqual(product["group1_resolution"]["reason"], "manifest_header")
+        self.assertEqual(response.context["unresolved_group1_count"], 0)
+
     def test_new_product_editor_is_first_compact_and_tab_ready(self):
         upload = SimpleUploadedFile("products_pon_pbp_auto.xml", self._catalog_bytes(), content_type="application/xml")
         self.client.post(reverse("receiving:upload_product_catalog"), {"file": upload, "customer_id": self.customer.pk})
@@ -464,8 +554,25 @@ class ProductCatalogWorkflowTests(TestCase):
         self.assertIn("Proposed from previous row", html)
         self.assertIn("Short name (max 30)", html)
         self.assertIn("Long name", html)
+        self.assertIn("Short name can be reviewed or entered manually", html)
         self.assertIn("Group1 family mappings", html)
         self.assertIn("There is no per-row confirmation step", html)
+        product_form = response.context["product_forms"][0]["form"]
+        for field_name in ("long_code", "full_name"):
+            self.assertTrue(product_form.fields[field_name].disabled)
+            self.assertEqual(product_form.fields[field_name].widget.attrs.get("tabindex"), "-1")
+        self.assertFalse(product_form.fields["short_name"].disabled)
+        self.assertNotEqual(product_form.fields["short_name"].widget.attrs.get("tabindex"), "-1")
+        self.assertIn("Replicate current bike", html)
+        self.assertIn("Next bikes (quantity)", html)
+        self.assertIn("Repeat to next", html)
+        self.assertIn("replicate-repeat-count", html)
+        self.assertIn("Enter a quantity between 1 and", html)
+        self.assertIn("sourceIndex + 1 + repeatCount", html)
+        self.assertIn("checkbox.tabIndex = -1", html)
+        self.assertNotIn("Through row", html)
+        self.assertNotIn("replicate-through-row", html)
+        self.assertNotIn("replicate-range-from", html)
 
     def test_export_contains_product_check_and_printable_barcodes(self):
         upload = SimpleUploadedFile("products_pon_pbp_auto.xml", self._catalog_bytes(), content_type="application/xml")
@@ -485,7 +592,7 @@ class ProductCatalogWorkflowTests(TestCase):
         self.assertEqual(workbook.sheetnames, ["PON Product Check", "BARCODE Converter"])
 
         check = workbook["PON Product Check"]
-        self.assertEqual([check.cell(1, column).value for column in range(6, 9)], ["Length (cm)", "Width (cm)", "Height (cm)"])
+        self.assertEqual([check.cell(1, column).value for column in range(6, 9)], ["Length (cm)", "Height (cm)", "Width (cm)"])
         statuses = {check.cell(row, 1).value: check.cell(row, 5).value for row in range(2, check.max_row)}
         self.assertEqual(statuses["04-14503"], "Existing")
         self.assertEqual(statuses["NEW-001"], "New")
@@ -564,20 +671,56 @@ class ProductCatalogWorkflowTests(TestCase):
         workbook = load_workbook(BytesIO(response.content), data_only=True)
         sheet = workbook["PON Product Check"]
         row = next(r for r in range(2, sheet.max_row) if sheet.cell(r, 1).value == "NEW-001")
-        self.assertEqual([sheet.cell(row, c).value for c in range(6, 9)], [200, 25, 118])
+        self.assertEqual([sheet.cell(row, c).value for c in range(6, 9)], [200, 118, 25])
         definition.refresh_from_db()
         self.assertEqual((definition.length_mm, definition.width_mm, definition.height_mm), (2000, 250, 1180))
 
     def test_new_product_import_uses_exact_columns_and_cubic_group_rule(self):
         upload = SimpleUploadedFile("products_pon_pbp_auto.xml", self._catalog_bytes(), content_type="application/xml")
         self.client.post(reverse("receiving:upload_product_catalog"), {"file": upload, "customer_id": self.customer.pk})
-        Group1Family.objects.update_or_create(family_name="Cervelo", defaults={"suffix": "CVL", "match_phrases": "cervelo\nC26\nC27", "priority": 100, "active": True})
+        Group1Family.objects.update_or_create(
+            family_name="Cervelo",
+            defaults={"suffix": "CVL", "match_phrases": "cervelo\nC26\nC27", "priority": 100, "active": True},
+        )
+
+        # Product Check now treats Code/Long Code/Short name/Long name as source-derived.
+        # Give the synthetic test the same source context a real Manifest provides.
+        received_line = self.batch.lines.get(code="NEW-001")
+        received_line.long_code = "LONG-001"
+        received_line.save(update_fields=["long_code"])
+        manifest_source = SourceFile.objects.create(
+            container=self.container,
+            kind="CLIENT",
+            file=SimpleUploadedFile("manifest.xlsx", b"placeholder"),
+            original_name="manifest.xlsx",
+            sha256="e" * 64,
+            status="CONFIRMED",
+            uploaded_by=self.user,
+        )
+        manifest_batch = ImportBatch.objects.create(
+            source_file=manifest_source,
+            status="CONFIRMED",
+            total_rows=1,
+            total_units=3,
+            created_by=self.user,
+        )
+        NormalizedLine.objects.create(
+            batch=manifest_batch,
+            source_sheet="Sheet1",
+            source_row=2,
+            code="",
+            long_code="LONG-001",
+            description="Cervelo C26 Bike 56",
+            quantity=3,
+        )
+
         save_response = self.client.post(
             reverse("receiving:product_check", args=[self.container.pk]),
             {
-                "product-0-long_code": "LONG-001",
-                "product-0-short_name": "A SHORT TRANSLOGIC NAME",
-                "product-0-full_name": "Cervelo A complete bicycle product name",
+                # Long Code and Long Name stay source-locked; Short Name is operator-editable.
+                "product-0-long_code": "FORGED-LONG",
+                "product-0-short_name": "C26 BIKE 56 MANUAL",
+                "product-0-full_name": "Unknown forged family",
                 "product-0-length_cm": "200.0",
                 "product-0-height_cm": "118.0",
                 "product-0-width_cm": "25.0",
@@ -586,6 +729,10 @@ class ProductCatalogWorkflowTests(TestCase):
         )
         self.assertRedirects(save_response, reverse("receiving:product_check", args=[self.container.pk]))
         definition = ProductDefinition.objects.get(code="NEW-001")
+        self.assertEqual(definition.long_code, "LONG-001")
+        self.assertEqual(definition.full_name, "Cervelo C26 Bike 56")
+        self.assertEqual(definition.short_name, "C26 BIKE 56 MANUAL")
+        self.assertLessEqual(len(definition.short_name), 30)
         self.assertEqual(definition.length_mm, 2000)
         self.assertEqual(definition.height_mm, 1180)
         self.assertEqual(definition.width_mm, 250)
@@ -599,13 +746,17 @@ class ProductCatalogWorkflowTests(TestCase):
         self.assertEqual(saved_form["length_cm"].value(), Decimal("200"))
         self.assertEqual(saved_form["height_cm"].value(), Decimal("118"))
         self.assertEqual(saved_form["width_cm"].value(), Decimal("25"))
+        for field_name in ("long_code", "full_name"):
+            self.assertTrue(saved_form.fields[field_name].disabled)
+        self.assertFalse(saved_form.fields["short_name"].disabled)
+
         response = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
         self.assertEqual(response.status_code, 200)
         workbook = load_workbook(BytesIO(response.content), data_only=True)
         sheet = workbook["New Product Import"]
         self.assertEqual(sheet.max_column, 30)
         self.assertEqual([sheet.cell(1, column).value for column in range(26, 31)], ["Inner", "Outer", "Layer", "Comment", "Date"])
-        self.assertEqual(sheet["C2"].value, "A SHORT TRANSLOGIC NAME")
+        self.assertEqual(sheet["C2"].value, definition.short_name)
         self.assertLessEqual(len(sheet["C2"].value), 30)
         self.assertEqual(sheet["K2"].value, "CHG02")
         self.assertEqual(sheet["T2"].value, 0.59)
@@ -616,7 +767,7 @@ class ProductCatalogWorkflowTests(TestCase):
         self.assertEqual(sheet["R2"].value, 0)
         self.assertEqual(sheet["S2"].value, 1)
         self.assertEqual(sheet["J2"].value, "PONCVL")
-        self.assertEqual(sheet["M2"].value, "Cervelo A complete bicycle product name")
+        self.assertEqual(sheet["M2"].value, "Cervelo C26 Bike 56")
         self.assertEqual(sheet["U2"].value, 29.5)
         self.assertEqual(sheet["AA2"].value, 1)
         self.assertEqual(sheet["AD2"].value.date(), date(2026, 9, 14))
@@ -674,6 +825,7 @@ class ProductCatalogWorkflowTests(TestCase):
         self.assertEqual(catalog_data["source_path"], r"C:\Data\PON_PRODUCTS.xml")
 
 
+# PON_PBP_GREEN_NEW_BLOCK_1008_1500
 class PbpToPonMigrationTests(TestCase):
     SKU = "0L0CAB111A48"
 
@@ -806,6 +958,106 @@ class PbpToPonMigrationTests(TestCase):
         self.assertEqual(response.context["product_forms"], [])
         self.assertContains(response, "PBP → PON")
 
+    def test_santa_cruz_manifest_header_resolves_group1_for_pbp_to_pon_export_and_readiness(self):
+        # Reproduce the real Santa Cruz case: the PBP/PON product name is abbreviated
+        # and deliberately does not contain a configured family phrase. The explicit
+        # Manifest header must provide the family context for both readiness and export.
+        short_name = "SKCH 1.1 CC 700C 26 LG BRWN"
+        long_name = "SKCH 1.1 CC 700C 26 LG BRWN Apex AU"
+        raw = dict(self.pbp_entry.raw_data or {})
+        raw.update({
+            "short_name": short_name,
+            "long_name": long_name,
+            "group1": "PBPSCZ",
+        })
+        self.pbp_entry.short_name = short_name
+        self.pbp_entry.long_name = long_name
+        self.pbp_entry.group1 = "PBPSCZ"
+        self.pbp_entry.raw_data = raw
+        self.pbp_entry.save(update_fields=["short_name", "long_name", "group1", "raw_data"])
+
+        Group1Family.objects.update_or_create(
+            family_name="Santa Cruz",
+            defaults={
+                "suffix": "SCZ",
+                # Do not match the abbreviated SKCH description; this test must
+                # prove that the Manifest header, not the name, supplies Group1.
+                "match_phrases": "Santa Cruz",
+                "priority": 100,
+                "active": True,
+            },
+        )
+
+        manifest_book = Workbook()
+        manifest_sheet = manifest_book.active
+        manifest_sheet.title = "Packing List"
+        manifest_sheet.append(["", "Santa Cruz - Article Number", "Description", "QTY ADVISED"])
+        manifest_sheet.append(["", self.SKU, long_name, 1])
+        manifest_bytes = BytesIO()
+        manifest_book.save(manifest_bytes)
+
+        manifest_source = SourceFile.objects.create(
+            container=self.container,
+            kind="CLIENT",
+            file=SimpleUploadedFile(
+                "santa-cruz-pbp-manifest.xlsx",
+                manifest_bytes.getvalue(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            original_name="santa-cruz-pbp-manifest.xlsx",
+            sha256="e" * 64,
+            status="CONFIRMED",
+            uploaded_by=self.user,
+        )
+        manifest_batch = ImportBatch.objects.create(
+            source_file=manifest_source,
+            status="CONFIRMED",
+            mapping={
+                "sheet_name": "Packing List",
+                "start_row": 2,
+                "start_column": "A",
+                "code_column": "",
+                "long_code_column": "B",
+                "description_column": "C",
+                "quantity_column": "D",
+                "_header_row": 1,
+            },
+            total_rows=1,
+            total_units=1,
+            created_by=self.user,
+        )
+        NormalizedLine.objects.create(
+            batch=manifest_batch,
+            source_sheet="Packing List",
+            source_row=2,
+            code=self.SKU,
+            long_code=self.SKU,
+            description=long_name,
+            quantity=1,
+            raw_data={"_manifest_section": "PEDAL 58"},
+        )
+
+        from receiving.views import _container_workspace_data
+
+        # First persist the historical classification, as happens in Product Check.
+        check = self.client.get(reverse("receiving:product_check", args=[self.container.pk]))
+        self.assertEqual(check.status_code, 200)
+
+        workspace = _container_workspace_data(self.container)
+        self.assertTrue(workspace["new_product_import_download_ready"])
+
+        export = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
+        self.assertEqual(export.status_code, 200)
+        self.assertEqual(
+            export["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        sheet = load_workbook(BytesIO(export.content), data_only=True)["New Product Import"]
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet["A2"].value, self.SKU)
+        self.assertEqual(sheet["J2"].value, "PONSCZ")
+        self.assertEqual(sheet["M2"].value, long_name)
+
     def test_product_check_summary_counts_unique_codes(self):
         rows = [
             {"code": "EXISTING-1", "location": "A", "count": 1, "classification": "EXISTING"},
@@ -864,7 +1116,7 @@ class PbpToPonMigrationTests(TestCase):
         sheet = load_workbook(BytesIO(export.content), data_only=True)["New Product Import"]
         self.assertEqual(sheet.max_row, 2)
         self.assertEqual(sheet["A2"].value, self.SKU)
-        self.assertTrue(all(cell.fill.fgColor.rgb == "FFF4B183" for cell in sheet[2]))
+        self.assertTrue(all(cell.fill.fgColor.rgb == "FFFFFF00" for cell in sheet[2]))
 
     def test_pbp_to_pon_is_included_in_existing_new_product_import_workflow(self):
         response = self.client.get(reverse("receiving:export_new_products", args=[self.container.pk]))
@@ -929,7 +1181,7 @@ class PbpToPonMigrationTests(TestCase):
         self.assertEqual(after["W2"].value, 250)
         self.assertEqual(after["X2"].value, 1340)
         for cell in after[2]:
-            self.assertEqual(cell.fill.fgColor.rgb, "FFF4B183")
+            self.assertEqual(cell.fill.fgColor.rgb, "FFFFFF00")
         from receiving.views import _container_workspace_data
         self.assertTrue(_container_workspace_data(self.container)["new_product_import_download_ready"])
 
@@ -980,7 +1232,7 @@ class PbpToPonMigrationTests(TestCase):
         self.assertEqual(sheet["V2"].value, 750)
         self.assertEqual(sheet["W2"].value, 250)
         self.assertEqual(sheet["X2"].value, 1340)
-        self.assertTrue(all(cell.fill.fgColor.rgb == "FFF4B183" for cell in sheet[2]))
+        self.assertTrue(all(cell.fill.fgColor.rgb == "FFFFFF00" for cell in sheet[2]))
         self.assertFalse(ProductDefinition.objects.filter(code=self.SKU).exists())
 
         state.refresh_from_db()
@@ -1108,8 +1360,12 @@ class PbpToPonMigrationTests(TestCase):
             self.assertFalse(sql.lstrip().startswith(("insert", "update", "delete")))
         self.assertEqual(len(catalog_queries), 2)
         for sql in catalog_queries:
-            self.assertIn('"customer" like', sql)
-            self.assertIn('"code" in', sql)
+            self.assertRegex(
+                sql,
+                r"""(?:upper|lower)\([^)]*"customer"[^)]*\)\s*=\s*(?:upper|lower)\('pon'\)|"customer"\s+like\s+'pon'""",
+            )
+            for field in ('code', 'pon_sku', 'code2'):
+                self.assertIn(f'"{field}" in', sql)
             self.assertIn(self.SKU.lower(), sql)
 
     def test_legacy_container_get_does_not_rebuild_history(self):
@@ -1153,7 +1409,7 @@ class PbpToPonMigrationTests(TestCase):
         self.assertEqual(sheet["B2"].value, self.SKU)
         self.assertEqual(sheet["J2"].value, "PONCVL")
         self.assertEqual(sheet["K2"].value, "CHG02")
-        self.assertTrue(all(cell.fill.fgColor.rgb == "FFF4B183" for cell in sheet[2]))
+        self.assertTrue(all(cell.fill.fgColor.rgb == "FFFFFF00" for cell in sheet[2]))
 
     def test_recent_sidebar_uses_two_queries_for_twenty_containers(self):
         from receiving.views import _recent_container_rows
@@ -1165,7 +1421,7 @@ class PbpToPonMigrationTests(TestCase):
         self.assertEqual(len(containers), 20)
         self.assertEqual(len(rows), 20)
 
-    def test_customer_report_does_not_mark_migration_new_and_colours_entire_row_orange(self):
+    def test_customer_report_does_not_mark_migration_new_and_colours_entire_row_green(self):
         client = [SimpleNamespace(code=self.SKU, quantity=1, description="Client description")]
         received = [SimpleNamespace(code=self.SKU, quantity=1, description="")]
         rows = build_client_report_rows(
@@ -1188,7 +1444,7 @@ class PbpToPonMigrationTests(TestCase):
         sheet = workbook["Receiving Container Data"]
         self.assertIsNone(sheet["G3"].value)
         for column in range(2, 8):
-            self.assertEqual(sheet.cell(3, column).fill.fgColor.rgb, "FFF4B183")
+            self.assertEqual(sheet.cell(3, column).fill.fgColor.rgb, "FFC6EFCE")
 
 class Stage2ServiceTests(TestCase):
     def test_product_moves_reconciliation_and_upstockserial_shape(self):
@@ -1216,7 +1472,7 @@ class Stage2ServiceTests(TestCase):
         self.assertEqual(lines[1], "   9399134,2,T4324")
         self.assertEqual(lines[2], "   9399135,3,T4324")
         self.assertEqual(lines[3], "   9399136,5,T4325")
-        self.assertEqual(len(lines), 501)
+        self.assertEqual(len(lines), 4)
 
     def test_upstockserial_is_sorted_by_movement_without_changing_assignment(self):
         rows = [
@@ -1229,7 +1485,7 @@ class Stage2ServiceTests(TestCase):
         self.assertEqual(lines[1], "   9399134,2,T4324")
         self.assertEqual(lines[2], "   9399135,3,T4324")
         self.assertEqual(lines[3], "   9399161,4,T4325")
-        self.assertEqual(len(lines), 501)
+        self.assertEqual(len(lines), 4)
 
     def test_stage2_blocks_product_count_mismatch(self):
         movements = parse_product_moves_csv(
@@ -2118,3 +2374,214 @@ class FirstScanScannerTests(TestCase):
         self.assertContains(live_page, 'id="continuous-scan-form"')
         self.assertContains(live_page, "Pause Scan")
         self.assertContains(live_page, "Take Photo")
+
+
+class SourceFilePositionalPreviewTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.temp_media = tempfile.TemporaryDirectory()
+        cls.override = override_settings(MEDIA_ROOT=cls.temp_media.name)
+        cls.override.enable()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.override.disable()
+        cls.temp_media.cleanup()
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="preview-user", password="test-password")
+        self.client.force_login(self.user)
+        self.customer = Customer.objects.create(code="PON", name="Pon.Bike")
+        self.container = Container.objects.create(
+            identifier="TGBU4621260",
+            customer=self.customer,
+            container_date=date(2026, 10, 6),
+            year=2026,
+            job_order="PREVIEW-JO-001",
+            created_by=self.user,
+        )
+
+    def _source(self, kind, workbook):
+        stream = BytesIO()
+        workbook.save(stream)
+        source = SourceFile(
+            container=self.container,
+            kind=kind,
+            original_name=f"{kind.lower()}-preview.xlsx",
+            sha256=("a" if kind == "CLIENT" else "b") * 64,
+            uploaded_by=self.user,
+        )
+        source.file.save(source.original_name, ContentFile(stream.getvalue()), save=True)
+        return source
+
+    def _manifest_source(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Manifest"
+        for column, header in zip(range(4, 9), ["Product Code", "Description", "QTY ADVISED", "Container ID", "Comment"]):
+            sheet.cell(19, column, header)
+        sheet["D20"] = "XM0STBFR148"
+        sheet["E20"] = "Bike one"
+        sheet["F20"] = 2
+        sheet["G20"] = self.container.identifier
+        sheet["D21"] = "0L0CAB111A48"
+        sheet["E21"] = "Bike two"
+        sheet["F21"] = 1
+        sheet["G21"] = self.container.identifier
+        return self._source("CLIENT", workbook)
+
+    def test_manifest_preview_uses_real_rows_columns_headers_and_mapping(self):
+        source = self._manifest_source()
+        before = {
+            "sources": SourceFile.objects.count(),
+            "batches": ImportBatch.objects.count(),
+            "lines": NormalizedLine.objects.count(),
+        }
+        response = self.client.get(reverse("receiving:source_file_preview", args=[source.pk]), {
+            "sheet_name": "Manifest", "start_row": 20, "start_column": "D",
+            "code_column": "D", "description_column": "E", "quantity_column": "F", "container_column": "G",
+        })
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        self.assertEqual(preview["first_cell"], "D20")
+        self.assertEqual([column["letter"] for column in preview["columns"][:5]], ["D", "E", "F", "G", "H"])
+        self.assertEqual([column["original_header"] for column in preview["columns"][:4]], ["Product Code", "Description", "QTY ADVISED", "Container ID"])
+        self.assertEqual([column["meaning"] for column in preview["columns"][:5]], ["Product / Main Code", "Description", "Quantity", "Container", "Not mapped"])
+        self.assertEqual([row["number"] for row in preview["rows"][:2]], [20, 21])
+        self.assertEqual(preview["rows"][0]["values"][:4], ["XM0STBFR148", "Bike one", "2", self.container.identifier])
+        reread = self.client.get(reverse("receiving:source_file_preview", args=[source.pk]), {
+            "sheet_name": "Manifest", "start_row": 20, "start_column": "D",
+            "code_column": "A", "refresh_detection": "1",
+        }).json()
+        self.assertEqual(reread["detected_mapping"]["code_column"], "D")
+        self.assertEqual(reread["preview"]["columns"][0]["meaning"], "Product / Main Code")
+        self.assertEqual(before, {
+            "sources": SourceFile.objects.count(),
+            "batches": ImportBatch.objects.count(),
+            "lines": NormalizedLine.objects.count(),
+        })
+
+    def test_scanned_preview_uses_real_start_and_location_stream_mapping(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Scanned"
+        sheet["F20"] = "T2525"
+        sheet["F21"] = "XM0STBFR148"
+        sheet["F22"] = "0L0CAB111A48"
+        source = self._source("RECEIVED", workbook)
+        response = self.client.get(reverse("receiving:source_file_preview", args=[source.pk]), {
+            "sheet_name": "Scanned", "start_row": 20, "start_column": "F", "code_column": "F", "location_stream": "1",
+        })
+        self.assertEqual(response.status_code, 200)
+        preview = response.json()["preview"]
+        self.assertEqual(preview["first_cell"], "F20")
+        self.assertEqual(preview["columns"][0]["letter"], "F")
+        self.assertEqual(preview["columns"][0]["meaning"], "Product / Main Code / Pallet / Location stream")
+        self.assertEqual([row["number"] for row in preview["rows"]], [20, 21, 22])
+        self.assertEqual([row["values"][0] for row in preview["rows"]], ["T2525", "XM0STBFR148", "0L0CAB111A48"])
+
+    def test_changing_start_returns_the_requested_real_worksheet_zone(self):
+        source = self._manifest_source()
+        first = self.client.get(reverse("receiving:source_file_preview", args=[source.pk]), {
+            "sheet_name": "Manifest", "start_row": 20, "start_column": "D", "code_column": "D",
+        }).json()["preview"]
+        second = self.client.get(reverse("receiving:source_file_preview", args=[source.pk]), {
+            "sheet_name": "Manifest", "start_row": 21, "start_column": "E", "description_column": "E",
+        }).json()["preview"]
+        self.assertEqual((first["first_cell"], first["rows"][0]["number"], first["columns"][0]["letter"]), ("D20", 20, "D"))
+        self.assertEqual((second["first_cell"], second["rows"][0]["number"], second["columns"][0]["letter"]), ("E21", 21, "E"))
+        self.assertEqual(second["rows"][0]["values"][0], "Bike two")
+
+    def test_mapping_page_exposes_read_only_refresh_and_positional_preview(self):
+        source = self._manifest_source()
+        response = self.client.get(reverse("receiving:configure_import", args=[source.pk]) + "?manual=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Re-read source file")
+        self.assertContains(response, "First preview column")
+        self.assertContains(response, "First cell used:")
+        self.assertContains(response, "Original header")
+        self.assertContains(response, "PON meaning")
+        self.assertContains(response, "Not mapped")
+        self.assertContains(response, 'id="preview-start-row">20</b>')
+        self.assertContains(response, 'id="preview-start-column">D</b>')
+        self.assertContains(response, 'id="preview-first-cell">D20</b>')
+        self.assertContains(response, "Bikes Qty")
+        self.assertContains(response, "Spare Parts Qty")
+
+
+class PendingReceivingImprovementsTests(TestCase):
+    def _workbook_path(self, workbook):
+        handle = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        handle.close()
+        workbook.save(handle.name)
+        self.addCleanup(lambda: os.path.exists(handle.name) and os.unlink(handle.name))
+        return handle.name
+
+    def test_headerless_two_code_scanned_file_starts_at_real_row_one(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Scanned"
+        sheet.append(["T4191", None])
+        sheet.append(["192219530376", "58-27322-351-3-941-232702"])
+        sheet.append(["192219523644", "58-27296-375-3-928-273301"])
+        sheet.append(["T4192", None])
+        sheet.append(["192219530420", "58-27322-351-5-942-232702"])
+        path = self._workbook_path(workbook)
+
+        analysis = analyse_workbook_mapping(path, "RECEIVED")
+        mapping = analysis["mapping"]
+        self.assertEqual(mapping["start_row"], 1)
+        self.assertEqual(mapping["code_column"], "A")
+        self.assertEqual(mapping["long_code_column"], "B")
+        self.assertEqual(analysis["header_row"], 0)
+        self.assertEqual(analysis["data_rows"], 3)
+
+        rows, errors = parse_workbook(path, mapping)
+        self.assertEqual(errors, [])
+        self.assertEqual([row["source_row"] for row in rows], [2, 3, 5])
+        self.assertEqual([row["location"] for row in rows], ["T4191", "T4191", "T4192"])
+        self.assertEqual(rows[0]["code"], "192219530376")
+        self.assertEqual(rows[0]["long_code"], "58-27322-351-3-941-232702")
+
+    def test_manifest_summary_keeps_spare_parts_but_excludes_them_from_bike_units(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Manifest"
+        sheet.append(["E-BIKES", "E-BIKES", "E-BIKES"])
+        sheet.append(["58-27322-351-3-941-232702", "Bike one", 2])
+        sheet.append(["SMALL PARTS", "SMALL PARTS", "SMALL PARTS"])
+        sheet.append(["04-27492", "Rocker Link", 3])
+        sheet.append(["04-99999", "Other spare", 4])
+        path = self._workbook_path(workbook)
+        mapping = {
+            "sheet_name": "Manifest",
+            "start_row": 1,
+            "row_step": 1,
+            "code_column": "",
+            "long_code_column": "A",
+            "description_column": "B",
+            "quantity_column": "C",
+            "container_column": "",
+            "coloured_rows_only": False,
+            "required_fill_signature": "",
+            "location_stream": False,
+        }
+        rows, errors = parse_workbook(path, mapping)
+        self.assertEqual(errors, [])
+        summary = summarize_import_rows(rows)
+        self.assertEqual(summary["data_rows"], 3)
+        self.assertEqual(summary["bike_units"], 2)
+        self.assertEqual(summary["spare_units"], 7)
+        self.assertEqual(len(rows), 3)
+
+    def test_client_workbook_units_count_bikes_only_not_spare_parts(self):
+        from .views import _batch_total_units
+        rows = [
+            {"quantity": 4, "raw_data": {"_manifest_section": "E-BIKES"}},
+            {"quantity": 2, "raw_data": {"_manifest_section": "FRAMES"}},
+            {"quantity": 6, "raw_data": {"_manifest_section": "SPARE PARTS"}},
+        ]
+        self.assertEqual(_batch_total_units("CLIENT", rows), 6)
+        self.assertEqual(_batch_total_units("RECEIVED", rows), 12)

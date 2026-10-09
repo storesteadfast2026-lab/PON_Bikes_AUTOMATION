@@ -1,0 +1,11 @@
+﻿{
+    "version":  "1007.1040",
+    "status":  "AUTO_ROLLED_BACK",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261007_104850_before_spare_parts_fix_171e0e46",
+    "updated_at":  "2026-10-07T10:49:01.8806819+10:30",
+    "files":  [
+                  "receiving\\services.py",
+                  "receiving\\views.py",
+                  "receiving\\test_first_scan_two_codes.py"
+              ]
+}

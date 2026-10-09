@@ -2,11 +2,29 @@
 {% block title %}First Scan · {{ container.identifier }}{% endblock %}
 {% block body_class %}first-scan-page{% endblock %}
 {% block content %}
+<style>
+  .scanner-title-pallet { white-space: nowrap; font-size: .72em; color: var(--blue-dark); }
+  .scanner-current-pallet-line { padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: #f8fafc; font-size: 14px; }
+  .scanner-current-pallet-line strong { margin-left: 6px; font: 850 18px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .scanner-history-table th:first-child, .scanner-history-table td:first-child { width: 120px; }
+  .scanner-history-pallet { font-weight: 850; font-size: 15px; white-space: nowrap; vertical-align: top; }
+  .scanner-history-code { font: 850 17px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+  .scanner-history-long { margin-top: 4px; font: 750 15px/1.25 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; }
+  @media (max-width: 700px) {
+    .scanner-title-pallet { display: block; margin-top: 4px; }
+    .scanner-history-table th:first-child, .scanner-history-table td:first-child { width: 88px; }
+  }
+</style>
 <div class="scanner-shell">
   <div class="scanner-header">
     <div>
       <p class="eyebrow">First Scan</p>
-      <h1>{{ container.identifier }}</h1>
+      <h1>
+        {{ container.identifier }}
+        {% if session %}
+        <span class="scanner-title-pallet">· Pallet <span id="pallet-position">{% if scanner_state.pallet_position %}{{ scanner_state.pallet_position }}{% else %}—{% endif %}</span><span id="pallet-known-total">{% if scanner_state.expected_pallet_count != None %}/{{ scanner_state.expected_pallet_count }}{% endif %}</span></span>
+        {% endif %}
+      </h1>
       <p><strong>{{ container.customer.code }}</strong> · {{ container.customer.name }}</p>
     </div>
     <a class="button secondary" href="{% url 'receiving:container_detail' container.pk %}#receive">Back to container</a>
@@ -23,15 +41,25 @@
       <div><dt>Current scanned total</dt><dd>{{ current_total }}</dd></div>
       <div><dt>Completion</dt><dd>{{ completion }}%</dd></div>
     </dl>
-    <div class="scanner-progress-card scanner-start-progress">
-      <div><strong>Container completion</strong><span>{{ completion }}%</span></div>
-      <progress max="100" value="{{ completion }}">{{ completion }}%</progress>
-    </div>
     <form method="post" class="scanner-mode-form">
       {% csrf_token %}
       <input type="hidden" name="action" value="start">
+      {% if container.first_scan_code_mode %}
+      <input type="hidden" name="code_mode" value="{{ container.first_scan_code_mode }}">
+      <div class="message info"><strong>Container mode:</strong> {{ container.get_first_scan_code_mode_display }}. This selection is retained for the container.</div>
+      {% else %}
       <fieldset>
-        <legend>Choose scan mode once</legend>
+        <legend>Choose bike mode once for this container</legend>
+        {% for value, label in code_mode_choices %}
+        <label class="scanner-mode-option {% if value == 'ONE_CODE' %}recommended{% endif %}">
+          <input type="radio" name="code_mode" value="{{ value }}" {% if value == 'ONE_CODE' %}checked{% endif %}>
+          <span><strong>{{ label }}</strong>{% if value == 'ONE_CODE' %}<small>Each product scan completes one bike</small>{% else %}<small>Main Code, then Long Code, completes one bike</small>{% endif %}</span>
+        </label>
+        {% endfor %}
+      </fieldset>
+      {% endif %}
+      <fieldset>
+        <legend>Barcode lookup</legend>
         {% for value, label in mode_choices %}
         <label class="scanner-mode-option {% if value == 'AUTO' %}recommended{% endif %}">
           <input type="radio" name="mode" value="{{ value }}" {% if value == 'AUTO' %}checked{% endif %}>
@@ -45,21 +73,13 @@
   {% else %}
   {{ scanner_state|json_script:"scanner-state" }}
   <section class="scanner-live" data-session-status="{{ session.status }}">
-    <div class="scanner-summary-grid">
-      <div class="scanner-summary-card"><span>Mode</span><strong>{{ session.get_mode_display }}</strong></div>
-      <div class="scanner-summary-card"><span>Container scanned</span><strong id="container-total">{{ scanner_state.current_total }}</strong><small id="container-expected">{% if scanner_state.expected_total != None %}of {{ scanner_state.expected_total }} expected{% else %}expected total unknown{% endif %}</small></div>
-      <div class="scanner-summary-card pallet-card"><span>Current pallet</span><strong id="current-pallet">{% if scanner_state.current_pallet %}{{ scanner_state.current_pallet }}{% else %}Scan pallet first{% endif %}</strong></div>
-      <div class="scanner-summary-card"><span>Pallet scanned</span><strong id="pallet-total">{{ scanner_state.pallet_total }}</strong><small id="pallet-expected">{% if scanner_state.pallet_expected != None %}of {{ scanner_state.pallet_expected }} expected{% else %}expected quantity unknown{% endif %}</small></div>
-    </div>
-
-    <div class="scanner-progress-card">
-      <div><strong>Container completion</strong><span id="completion-label">{{ scanner_state.completion }}%</span></div>
-      <progress id="container-progress" max="100" value="{{ scanner_state.completion }}">{{ scanner_state.completion }}%</progress>
-      <div class="pallet-progress-line"><strong>Pallet completion</strong><span id="pallet-completion-label">{% if scanner_state.pallet_expected %}{{ scanner_state.pallet_completion }}%{% else %}Not available{% endif %}</span></div>
-      <progress id="pallet-progress" max="100" value="{{ scanner_state.pallet_completion }}">{{ scanner_state.pallet_completion }}%</progress>
-    </div>
+    <div class="scanner-current-pallet-line">Current pallet:<strong id="current-pallet">{% if scanner_state.current_pallet %}{{ scanner_state.current_pallet }}{% else %}Scan pallet first{% endif %}</strong></div>
 
     <div id="scanner-feedback" class="scanner-feedback" aria-live="assertive"></div>
+
+    {% if scanner_state.pending_main_code %}
+    <div class="message warning"><strong>Waiting for Long Code:</strong> {{ scanner_state.pending_main_code }}</div>
+    {% endif %}
 
     {% if session.status == 'ACTIVE' %}
     <form method="post" id="continuous-scan-form" class="continuous-scan-form" autocomplete="off">
@@ -76,27 +96,27 @@
     <div class="scanner-paused-banner">Scanning is paused. The container, pallet, scans and counters are preserved.</div>
     {% endif %}
 
-    <section id="last-scan-card" class="scanner-last-card" {% if not scanner_state.last_scan %}hidden{% endif %}>
-      <h2>Last result</h2>
-      <dl class="scanner-definition">
-        <div><dt>Scanned value</dt><dd id="last-scanned-value">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.scanned_value }}{% endif %}</dd></div>
-        <div><dt>Resolved Code</dt><dd id="last-resolved-code">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.resolved_code|default:"—" }}{% endif %}</dd></div>
-        <div><dt>Long Code</dt><dd id="last-long-code">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.long_code|default:"—" }}{% endif %}</dd></div>
-        <div><dt>Pallet</dt><dd id="last-pallet">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.pallet|default:"—" }}{% endif %}</dd></div>
-        <div><dt>Result</dt><dd id="last-message">{% if scanner_state.last_scan %}{{ scanner_state.last_scan.message }}{% endif %}</dd></div>
-      </dl>
-    </section>
-
     <section class="card scanner-recent-card">
-      <div class="table-heading"><h2>Recent scans for current pallet</h2><small>Latest 10</small></div>
+      <div class="table-heading"><h2>Recent scans</h2><small>Latest 10 bikes</small></div>
       <div class="table-wrap">
-        <table>
-          <thead><tr><th>Time</th><th>Code / Long Code</th><th>Result</th></tr></thead>
+        <table class="scanner-history-table">
+          <thead><tr><th>Pallet</th><th>Scanned codes</th><th>Result</th></tr></thead>
           <tbody id="recent-scans-body">
           {% for item in scanner_state.recent %}
-            <tr><td>{{ item.time }}</td><td><strong>{{ item.input_type }}</strong><br>{{ item.scanned_value }}{% if item.resolved_code %}<br><small>{{ item.resolved_code }}</small>{% endif %}</td><td class="scanner-result-{{ item.result }}">{{ item.message }}</td></tr>
+            <tr>
+              <td class="scanner-history-pallet">{{ item.pallet|default:"—" }}</td>
+              <td>
+                {% if scanner_state.code_mode == "TWO_CODES" %}
+                  <div class="scanner-history-code">{{ item.resolved_code|default:item.scanned_value }}</div>
+                  {% if item.long_code %}<div class="scanner-history-long">{{ item.long_code }}</div>{% endif %}
+                {% else %}
+                  <div class="scanner-history-code">{{ item.scanned_value }}</div>
+                {% endif %}
+              </td>
+              <td class="scanner-result-{{ item.result }}">{{ item.message }}</td>
+            </tr>
           {% empty %}
-            <tr class="empty-row"><td colspan="3">No bike scans for the current pallet yet.</td></tr>
+            <tr class="empty-row"><td colspan="3">No bike scans yet.</td></tr>
           {% endfor %}
           </tbody>
         </table>
@@ -162,28 +182,33 @@
         row.className = 'empty-row';
         const cell = document.createElement('td');
         cell.colSpan = 3;
-        cell.textContent = 'No bike scans for the current pallet yet.';
+        cell.textContent = 'No bike scans yet.';
         row.appendChild(cell);
         body.appendChild(row);
         return;
       }
       items.forEach((item) => {
         const row = document.createElement('tr');
-        const time = document.createElement('td');
-        time.textContent = item.time;
+        const pallet = document.createElement('td');
+        pallet.className = 'scanner-history-pallet';
+        pallet.textContent = item.pallet || '—';
+
         const value = document.createElement('td');
-        const type = document.createElement('strong');
-        type.textContent = item.input_type;
-        value.append(type, document.createElement('br'), document.createTextNode(item.scanned_value));
-        if (item.resolved_code) {
-          const code = document.createElement('small');
-          code.textContent = item.resolved_code;
-          value.append(document.createElement('br'), code);
+        const mainCode = document.createElement('div');
+        mainCode.className = 'scanner-history-code';
+        mainCode.textContent = state.code_mode === 'TWO_CODES' ? (item.resolved_code || item.scanned_value) : item.scanned_value;
+        value.appendChild(mainCode);
+        if (state.code_mode === 'TWO_CODES' && item.long_code) {
+          const longCode = document.createElement('div');
+          longCode.className = 'scanner-history-long';
+          longCode.textContent = item.long_code;
+          value.appendChild(longCode);
         }
+
         const result = document.createElement('td');
         result.className = `scanner-result-${item.result}`;
         result.textContent = item.message;
-        row.append(time, value, result);
+        row.append(pallet, value, result);
         body.appendChild(row);
       });
     };
@@ -191,24 +216,12 @@
     const renderState = (nextState) => {
       state = nextState;
       clockBase = Date.now();
-      document.getElementById('container-total').textContent = state.current_total;
-      document.getElementById('container-expected').textContent = state.expected_total === null ? 'expected total unknown' : `of ${state.expected_total} expected`;
       document.getElementById('current-pallet').textContent = state.current_pallet || 'Scan pallet first';
-      document.getElementById('pallet-total').textContent = state.pallet_total;
-      document.getElementById('pallet-expected').textContent = state.pallet_expected === null ? 'expected quantity unknown' : `of ${state.pallet_expected} expected`;
-      document.getElementById('completion-label').textContent = `${state.completion}%`;
-      document.getElementById('container-progress').value = state.completion;
-      document.getElementById('pallet-completion-label').textContent = state.pallet_expected === null ? 'Not available' : `${state.pallet_completion}%`;
-      document.getElementById('pallet-progress').value = state.pallet_completion;
+      const palletPosition = document.getElementById('pallet-position');
+      const palletKnownTotal = document.getElementById('pallet-known-total');
+      if (palletPosition) palletPosition.textContent = state.pallet_position || '—';
+      if (palletKnownTotal) palletKnownTotal.textContent = state.expected_pallet_count === null ? '' : `/${state.expected_pallet_count}`;
       renderRecent(state.recent);
-      if (state.last_scan) {
-        document.getElementById('last-scan-card').hidden = false;
-        document.getElementById('last-scanned-value').textContent = state.last_scan.scanned_value;
-        document.getElementById('last-resolved-code').textContent = state.last_scan.resolved_code || '—';
-        document.getElementById('last-long-code').textContent = state.last_scan.long_code || '—';
-        document.getElementById('last-pallet').textContent = state.last_scan.pallet || '—';
-        document.getElementById('last-message').textContent = state.last_scan.message;
-      }
       renderTimers();
     };
 

@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import views, second_scan
 
 
 app_name = "receiving"
@@ -10,6 +10,8 @@ urlpatterns = [
     path("catalog/sync/", views.sync_product_catalog, name="sync_product_catalog"),
     path("containers/<int:pk>/", views.container_detail, name="container_detail"),
     path("containers/<int:pk>/first-scan/", views.first_scan_scanner, name="first_scan_scanner"),
+    path("containers/<int:pk>/second-scan/", second_scan.scanner, name="second_scan_scanner"),
+    path("containers/<int:pk>/second-scan/download/<str:kind>/", second_scan.download, name="second_scan_download"),
     path("containers/<int:pk>/edit/", views.edit_container, name="edit_container"),
     path("containers/<int:pk>/upload/", views.upload_source, name="upload_source"),
     path("containers/<int:pk>/import-server/", views.import_server_source, name="import_server_source"),
@@ -31,6 +33,7 @@ urlpatterns = [
     path("containers/<int:pk>/reopen/", views.reopen_container, name="reopen_container"),
     path("client-report/exports/<int:export_id>/download/", views.download_client_report, name="download_client_report"),
     path("sources/<int:source_id>/configure/", views.configure_import, name="configure_import"),
+    path("sources/<int:source_id>/source-preview/", views.source_file_preview, name="source_file_preview"),
     path("imports/<int:batch_id>/preview/", views.batch_preview, name="batch_preview"),
     path("imports/<int:batch_id>/confirm/", views.confirm_batch, name="confirm_batch"),
 ]

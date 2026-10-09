@@ -40,7 +40,7 @@
   <div class="catalog-actions">
     <form method="post" action="{% url 'receiving:sync_product_moves' container.pk %}">
       {% csrf_token %}
-      <button class="button primary" {% if not product_moves_available %}disabled{% endif %}>Read / refresh PRODUCT_MOVES.CSV</button>
+      <button class="button primary" {% if not product_moves_available %}disabled{% endif %}>{% if product_moves_direct %}Read / refresh PRODUCT_MOVES.CSV{% else %}Read local working copy{% endif %}</button>
     </form>
     <form method="post" enctype="multipart/form-data" action="{% url 'receiving:upload_product_moves' container.pk %}" class="catalog-upload">
       {% csrf_token %}
@@ -48,6 +48,9 @@
       <button class="button secondary">Upload CSV fallback</button>
     </form>
   </div>
+  {% if not product_moves_direct %}
+    <p class="muted">Upload CSV fallback imports the selected file immediately. The local working-copy button is only for a copy that has been refreshed externally; an older local copy cannot replace a newer manual upload.</p>
+  {% endif %}
 </section>
 
 <section class="card">

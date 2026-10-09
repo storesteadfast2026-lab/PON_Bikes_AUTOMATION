@@ -1,6 +1,7 @@
 from django import forms
 from decimal import Decimal
 import re
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 from .models import Container, ProductCatalog, ProductDefinition, SourceFile
 
@@ -111,7 +112,15 @@ class ProductDefinitionForm(forms.ModelForm):
         }
 
     def __init__(self, *args, **kwargs):
+        lock_source_fields = bool(kwargs.pop("lock_source_fields", False))
         super().__init__(*args, **kwargs)
+        # ProductDefinitionForm is shared by other workflows. Source-derived
+        # fields are locked only when Product Check explicitly requests it.
+        if lock_source_fields:
+            for field_name in ("long_code", "full_name"):
+                self.fields[field_name].disabled = True
+                self.fields[field_name].widget.attrs["tabindex"] = "-1"
+                self.fields[field_name].widget.attrs["aria-readonly"] = "true"
         if self.instance and self.instance.pk:
             self.initial.setdefault("length_cm", Decimal(self.instance.length_mm) / Decimal("10"))
             self.initial.setdefault("height_cm", Decimal(self.instance.height_mm) / Decimal("10"))
@@ -138,8 +147,9 @@ class ProductDefinitionForm(forms.ModelForm):
 class ImportMappingForm(forms.Form):
     sheet_name = forms.ChoiceField(label="Worksheet")
     start_row = forms.IntegerField(min_value=1, initial=2, label="First data row")
+    start_column = forms.CharField(max_length=3, required=False, initial="A", label="First preview column")
     row_step = forms.IntegerField(min_value=1, max_value=20, initial=1, label="Read every N rows")
-    code_column = forms.CharField(max_length=3, initial="", label="Bike code column")
+    code_column = forms.CharField(max_length=3, required=False, initial="", label="Bike code column")
     long_code_column = forms.CharField(max_length=3, required=False, label="LongCode column")
     description_column = forms.CharField(max_length=3, required=False, label="Description column")
     quantity_column = forms.CharField(max_length=3, required=False, label="Quantity column")
@@ -153,7 +163,7 @@ class ImportMappingForm(forms.Form):
     )
     location_stream = forms.BooleanField(
         required=False,
-        label="Single-column scan file: T9999 rows set the location for following bikes",
+        label="Scanner file: T9999 rows set the pallet/location for following bikes",
     )
     save_profile = forms.BooleanField(required=False, label="Save this mapping for the customer")
     profile_name = forms.CharField(max_length=100, required=False, label="Profile name")
@@ -161,6 +171,13 @@ class ImportMappingForm(forms.Form):
     def __init__(self, *args, sheets=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["sheet_name"].choices = [(name, name) for name in (sheets or [])]
+
+    def clean_start_column(self):
+        value = (self.cleaned_data.get("start_column") or "A").strip().upper()
+        try:
+            return get_column_letter(column_index_from_string(value))
+        except ValueError as exc:
+            raise forms.ValidationError("Enter a valid Excel column, for example A or D.") from exc
 
     def clean(self):
         cleaned = super().clean()
@@ -171,4 +188,6 @@ class ImportMappingForm(forms.Form):
             if value and (not value.isalpha() or len(value) > 3):
                 self.add_error(field, "Use an Excel column letter, for example A, D or AA.")
             cleaned[field] = value
+        if not cleaned.get("code_column") and not cleaned.get("long_code_column"):
+            self.add_error("code_column", "Enter a Bike code column or a LongCode column.")
         return cleaned

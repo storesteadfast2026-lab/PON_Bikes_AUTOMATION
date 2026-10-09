@@ -41,6 +41,7 @@ from receiving.views import (
     _configured_product_moves_path,
     _direct_product_moves_path,
     _export_stale,
+    _first_scan_two_codes,
     _new_product_transfer_status,
     _upstock_transfer_status,
 )
@@ -119,6 +120,7 @@ def workflow_row(container):
         comparison_rows = compare_lines(
             client_batch.lines.all() if client_batch else [],
             received_batch.lines.all() if received_batch else [],
+            two_codes=_first_scan_two_codes(container),
         )
         expected_units = sum(row["expected"] for row in comparison_rows)
         received_units = sum(row["received"] for row in comparison_rows)

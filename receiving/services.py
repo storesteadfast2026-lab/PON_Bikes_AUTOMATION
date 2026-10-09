@@ -23,6 +23,10 @@ from reportlab.graphics.barcode.code128 import Code128
 LOCATION_PATTERN = re.compile(r"^T\d{4}$", re.IGNORECASE)
 CONTAINER_PATTERN = re.compile(r"^[A-Z]{4}\d{7}$")
 PRODUCT_CODE_PATTERN = re.compile(r"^(?=.*\d)[A-Z0-9][A-Z0-9._/-]{5,19}$", re.IGNORECASE)
+PON_LONG_CODE_PATTERN = re.compile(
+    r"^(?:58-\d{5}-\d{3}-\d-\d{3}-\d{6}(?:-\d{2})?|68-\d{5}-\d-\d{3}-\d{4}(?:-WT)?)$",
+    re.IGNORECASE,
+)
 PRODUCT_CATALOG_PATTERN = re.compile(r"^.+\.(?:xls|xml)$", re.IGNORECASE)
 PRODUCT_CATALOG_HEADERS = ("code", "pon_sku", "customer", "code2", "short_name", "long_name", "group1", "group2")
 PRODUCT_CATALOG_OPTIONAL_FIELDS = ("cubic", "weight", "height", "width", "length")
@@ -56,6 +60,79 @@ EXPORT_DEFAULTS = {
     "TL_LIFT": "1",
     "TL_OUTER": "1",
 }
+
+
+def is_pon_long_code(value):
+    return bool(PON_LONG_CODE_PATTERN.fullmatch(str(value or "").strip().upper()))
+
+
+NON_SCANNABLE_MANIFEST_SECTIONS = {"SMALL PARTS", "SPARE PARTS"}
+
+
+def manifest_section(line):
+    if isinstance(line, dict):
+        raw_data = line.get("raw_data", {}) or {}
+    else:
+        raw_data = getattr(line, "raw_data", {}) or {}
+    return str(raw_data.get("_manifest_section", "") or "").strip()
+
+
+def normalise_manifest_section(value):
+    return re.sub(r"[\s_-]+", " ", str(value or "").strip().upper()).strip()
+
+
+def is_non_scannable_manifest_section(value):
+    return normalise_manifest_section(value) in NON_SCANNABLE_MANIFEST_SECTIONS
+
+
+def is_non_scannable_manifest_line(line):
+    return is_non_scannable_manifest_section(manifest_section(line))
+
+
+def summarize_import_rows(rows):
+    """Return physical-bike and spare-part quantities without dropping manifest rows."""
+    summary = {
+        "data_rows": 0,
+        "bike_rows": 0,
+        "bike_units": 0,
+        "spare_rows": 0,
+        "spare_units": 0,
+    }
+    for row in rows:
+        quantity = int((row.get("quantity", 0) if isinstance(row, dict) else getattr(row, "quantity", 0)) or 0)
+        summary["data_rows"] += 1
+        if is_non_scannable_manifest_line(row):
+            summary["spare_rows"] += 1
+            summary["spare_units"] += quantity
+        else:
+            summary["bike_rows"] += 1
+            summary["bike_units"] += quantity
+    return summary
+
+
+def _line_reconciliation_code(line, use_long_code=False):
+    code = str(getattr(line, "code", "") or "").strip().upper()
+    long_code = str(getattr(line, "long_code", "") or "").strip().upper()
+    return (long_code or code) if use_long_code else code
+
+
+def _uses_two_code_reconciliation(received_lines):
+    for line in received_lines:
+        raw_data = getattr(line, "raw_data", {}) or {}
+        if str(raw_data.get("scanner_code_mode", "") or "").upper() == "TWO_CODES":
+            return True
+    return False
+
+
+def first_scan_expected_units(client_lines, two_codes=False):
+    scannable_lines = [line for line in client_lines if not is_non_scannable_manifest_line(line)]
+    if not two_codes:
+        return sum(int(getattr(line, "quantity", 0) or 0) for line in scannable_lines)
+    return sum(
+        int(getattr(line, "quantity", 0) or 0)
+        for line in scannable_lines
+        if is_pon_long_code(_line_reconciliation_code(line, use_long_code=True))
+    )
 
 SHORT_NAME_REPLACEMENTS = [
     ("FRAMESET", "FR SET"),
@@ -660,6 +737,25 @@ def _group_product_rows_by_code(rows):
         result.append(item)
     return sorted(result, key=lambda item: (item["location"], item["code"]))
 
+def _order_product_check_rows(rows):
+    """Keep historical PBP migrations together before the physical-order rows."""
+    printable_rows = _group_product_rows_by_code(rows)
+    pbp_rows = sorted(
+        (row for row in printable_rows if row.get("is_pbp_to_pon")),
+        key=lambda row: row["code"],
+    )
+    existing_rows = [
+        row for row in printable_rows
+        if not row.get("is_pbp_to_pon") and not row.get("is_new")
+    ]
+    truly_new_rows = [
+        row for row in printable_rows
+        if row.get("is_new") and not row.get("is_pbp_to_pon")
+    ]
+    return pbp_rows + existing_rows + truly_new_rows
+
+
+
 
 def _excel_column_width_pixels(width):
     """Approximate Excel's standard character-width conversion to pixels."""
@@ -686,14 +782,17 @@ def _center_image_in_cell(image, row_number, column_number, column_width, row_he
     )
 
 
+# PON_PBP_GREEN_NEW_BLOCK_1008_1500
+# PON_PRODUCT_CHECK_DIMENSION_ORDER_1008_1540
+# PON_PBP_PERSISTED_VISUAL_ORDER_1009_0815
 def build_product_check_workbook(container_identifier, rows):
     """Create the review sheet used to identify new Translogic products."""
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "PON Product Check"
-    printable_rows = _group_product_rows_by_code(rows)
+    printable_rows = _order_product_check_rows(rows)
 
-    headers = [container_identifier, "Long_Code", "Count", "LOC", "Status", "Length (cm)", "Width (cm)", "Height (cm)", "Kg", "TL Code", "Matched By"]
+    headers = [container_identifier, "Long_Code", "Count", "LOC", "Status", "Length (cm)", "Height (cm)", "Width (cm)", "Kg", "TL Code", "Matched By"]
     worksheet.append(headers)
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -701,7 +800,7 @@ def build_product_check_workbook(container_identifier, rows):
     new_fill = PatternFill("solid", fgColor="FCE8E6")
     existing_fill = PatternFill("solid", fgColor="E6F4EA")
     dimension_fill = PatternFill("solid", fgColor="FFF4CC")
-    migration_fill = PatternFill("solid", fgColor="FFF4B183")
+    migration_fill = PatternFill("solid", fgColor="FFFFFF00")
 
     for cell in worksheet[1]:
         cell.fill = header_fill
@@ -721,8 +820,8 @@ def build_product_check_workbook(container_identifier, rows):
                 row["location"],
                 row.get("status", ""),
                 round(float(history["length_mm"]) / 10, 1) if use_history else (round(definition.length_mm / 10, 1) if definition else ""),
-                round(float(history["width_mm"]) / 10, 1) if use_history else (round(definition.width_mm / 10, 1) if definition else ""),
                 round(float(history["height_mm"]) / 10, 1) if use_history else (round(definition.height_mm / 10, 1) if definition else ""),
+                round(float(history["width_mm"]) / 10, 1) if use_history else (round(definition.width_mm / 10, 1) if definition else ""),
                 float(history["weight_kg"]) if use_history else (definition.weight_kg if definition else ""),
                 row["tl_code"],
                 row["matched_by"],
@@ -741,13 +840,16 @@ def build_product_check_workbook(container_identifier, rows):
             status_cell.font = Font(bold=True, color="B3261E")
         elif row.get("is_pbp_to_pon"):
             status_cell.fill = migration_fill
-            status_cell.font = Font(bold=True, color="7F6000")
+            status_cell.font = Font(bold=True, color="006100")
         else:
             status_cell.fill = existing_fill
             status_cell.font = Font(bold=True, color="166534")
         if (row["is_new"] or row.get("is_pbp_to_pon")) and not definition and not (row.get("pbp_to_pon_data") or {}).get("valid"):
             for column in range(6, 10):
                 worksheet.cell(current, column).fill = dimension_fill
+        if row.get("is_pbp_to_pon"):
+            for cell in worksheet[current]:
+                cell.fill = migration_fill
 
     total_row = worksheet.max_row + 1
     worksheet.cell(total_row, 1, "Total")
@@ -1016,12 +1118,13 @@ def reconcile_product_movements(received_lines, movement_rows):
     }
 
 
+# PON_UPSTOCK_NO_EMPTY_ROWS_1008.1313
 def build_upstockserial_csv(rows, max_rows=500):
-    """Build the exact legacy three-column UPStockSerial.csv shape.
+    """Build the three-column UPStockSerial.csv file.
 
-    The historical template contains A2:C501, so the operational output is padded
-    to 500 data rows. This intentionally preserves the existing Translogic import
-    procedure rather than silently changing its file shape.
+    The historical Excel worksheet had capacity through row 501, but the CSV output
+    must contain only real bike rows. ``max_rows`` remains a safety limit; no empty
+    padding rows are appended.
     """
     if len(rows) > max_rows:
         raise ValueError(
@@ -1048,29 +1151,70 @@ def build_upstockserial_csv(rows, max_rows=500):
         if not movement or not serial_no or not location:
             raise ValueError("Cannot generate UPStockSerial.csv while a matched row is incomplete.")
         writer.writerow([movement.rjust(10), serial_no, location])
-    for _ in range(max_rows - len(rows)):
-        writer.writerow(["", "", ""])
     return output.getvalue().encode("utf-8")
 
 
-def build_client_report_rows(client_lines, received_lines, catalog_entries=(), product_definitions=(), product_statuses=None, product_classifications=None, target_customer=""):
-    """Build the final customer receiving report rows.
+# PON_CLIENT_REPORT_TWO_CODE_SPARES_1008.1032
+def resolve_client_report_two_codes(client_lines, received_lines, configured_two_codes=False):
+    """Resolve the customer-report reconciliation key without changing First Scan.
 
-    Advised quantity comes from the confirmed client manifest. Received quantity
-    comes from the confirmed first scan. Client-manifest order is preserved and
-    unexpected received-only codes are appended in first-scan order.
-
-    Long names prefer the active Translogic XML for existing products, then the
-    saved ProductDefinition for products created by this workflow, and finally
-    the description supplied by the client. A product absent from the active XML
-    is marked ``New`` in Comment.
+    A stored TWO_CODES mode is authoritative. When older containers have a blank
+    stored mode, compare the confirmed client manifest against the confirmed
+    First Scan and choose Long Code only when it has strictly better overlap
+    than physical Code. This preserves the normal one-code flow.
     """
+    if configured_two_codes:
+        return True
+
+    client_keys = set()
+    for line in client_lines:
+        key = _line_reconciliation_code(line, use_long_code=True)
+        if key and is_pon_long_code(key):
+            client_keys.add(key)
+
+    if not client_keys:
+        return False
+
+    code_overlap = 0
+    long_overlap = 0
+    for line in received_lines:
+        quantity = int(getattr(line, "quantity", 0) or 0)
+        code = str(getattr(line, "code", "") or "").strip().upper()
+        long_code = str(getattr(line, "long_code", "") or "").strip().upper()
+        if code in client_keys:
+            code_overlap += quantity
+        if long_code in client_keys:
+            long_overlap += quantity
+
+    return long_overlap > 0 and long_overlap > code_overlap
+
+
+def build_client_report_rows(client_lines, received_lines, catalog_entries=(), product_definitions=(), product_statuses=None, product_classifications=None, target_customer="", two_codes=None):
+    """Build final customer receiving rows, separating bikes from spare parts.
+
+    Bike reconciliation uses physical Code for normal one-code flows and Long Code
+    for confirmed/detected two-code flows. Non-bike manifest rows are retained as
+    spare-parts rows using the exact client description and manifest section, but
+    they are not treated as missing bikes and do not receive a bike First Scan count.
+    """
+    client_lines = list(client_lines)
+    received_lines = list(received_lines)
+    if two_codes is None:
+        two_codes = resolve_client_report_two_codes(
+            client_lines,
+            received_lines,
+            configured_two_codes=_uses_two_code_reconciliation(received_lines),
+        )
+
     advised = defaultdict(int)
     received = defaultdict(int)
     client_descriptions = {}
     received_descriptions = {}
+    physical_codes = defaultdict(list)
     ordered_codes = []
     seen_codes = set()
+    spare_parts = []
+    spare_index = {}
 
     def remember(code):
         if code and code not in seen_codes:
@@ -1078,9 +1222,36 @@ def build_client_report_rows(client_lines, received_lines, catalog_entries=(), p
             seen_codes.add(code)
 
     for line in client_lines:
-        code = str(getattr(line, "code", "") or "").strip().upper()
+        code = _line_reconciliation_code(line, use_long_code=two_codes)
         if not code:
             continue
+
+        if two_codes and not is_pon_long_code(code):
+            section_name = manifest_section(line) or "SPARE PARTS"
+            client_name = str(getattr(line, "description", "") or "").replace("\xa0", " ").strip()
+            spare_key = (section_name, code, client_name)
+            quantity = int(getattr(line, "quantity", 0) or 0)
+            if spare_key in spare_index:
+                spare_parts[spare_index[spare_key]]["advised"] += quantity
+            else:
+                spare_index[spare_key] = len(spare_parts)
+                spare_parts.append(
+                    {
+                        "code": code,
+                        "item_name": client_name or code,
+                        "advised": quantity,
+                        "received": None,
+                        "variance": None,
+                        "comment": "Not part of bike First Scan",
+                        "is_new": False,
+                        "is_pbp_to_pon": False,
+                        "classification": "SPARE_PART",
+                        "is_spare_part": True,
+                        "section_name": section_name,
+                    }
+                )
+            continue
+
         remember(code)
         advised[code] += int(getattr(line, "quantity", 0) or 0)
         description = re.sub(r"\s+", " ", str(getattr(line, "description", "") or "").replace("\xa0", " ").strip())
@@ -1088,11 +1259,16 @@ def build_client_report_rows(client_lines, received_lines, catalog_entries=(), p
             client_descriptions[code] = description
 
     for line in received_lines:
-        code = str(getattr(line, "code", "") or "").strip().upper()
+        code = _line_reconciliation_code(line, use_long_code=two_codes)
         if not code:
+            continue
+        if two_codes and not is_pon_long_code(code):
             continue
         remember(code)
         received[code] += int(getattr(line, "quantity", 0) or 0)
+        physical_code = str(getattr(line, "code", "") or "").strip().upper()
+        if physical_code and physical_code not in physical_codes[code]:
+            physical_codes[code].append(physical_code)
         description = re.sub(r"\s+", " ", str(getattr(line, "description", "") or "").replace("\xa0", " ").strip())
         if description and code not in received_descriptions:
             received_descriptions[code] = description
@@ -1108,8 +1284,9 @@ def build_client_report_rows(client_lines, received_lines, catalog_entries=(), p
 
     rows = []
     for code in ordered_codes:
-        catalogue, _ = _catalog_match_for_target(code, catalogue_index, target_customer)
-        definition = definitions.get(code)
+        lookup_code = physical_codes.get(code, [code])[0]
+        catalogue, _ = _catalog_match_for_target(lookup_code, catalogue_index, target_customer)
+        definition = definitions.get(lookup_code) or definitions.get(code)
         if catalogue and str(getattr(catalogue, "long_name", "") or "").strip():
             long_name = re.sub(r"\s+", " ", str(catalogue.long_name).replace("\xa0", " ").strip())
         elif definition and str(getattr(definition, "full_name", "") or "").strip():
@@ -1119,8 +1296,8 @@ def build_client_report_rows(client_lines, received_lines, catalog_entries=(), p
 
         advised_qty = advised.get(code, 0)
         received_qty = received.get(code, 0)
-        classification = (product_classifications or {}).get(code, "")
-        historical_new = product_statuses is not None and code in product_statuses and bool(product_statuses[code])
+        classification = (product_classifications or {}).get(lookup_code, "")
+        historical_new = product_statuses is not None and lookup_code in product_statuses and bool(product_statuses[lookup_code])
         is_new = historical_new or classification == "NEW" or (not classification and catalogue is None)
         is_pbp_to_pon = (not is_new) and classification == "PBP_TO_PON"
         rows.append(
@@ -1129,18 +1306,26 @@ def build_client_report_rows(client_lines, received_lines, catalog_entries=(), p
                 "item_name": long_name,
                 "advised": advised_qty,
                 "received": received_qty,
-                "variance": received_qty - advised_qty,
-                "comment": "New" if is_new else "",
+                "variance": (advised_qty - received_qty) if two_codes else (received_qty - advised_qty),
+                "comment": (
+                    "Unadvised / Not Advised"
+                    if two_codes and advised_qty == 0 and received_qty
+                    else ("New" if is_new else "")
+                ),
                 "is_new": is_new,
                 "is_pbp_to_pon": is_pbp_to_pon,
                 "classification": "PBP_TO_PON" if is_pbp_to_pon else ("NEW" if is_new else "EXISTING"),
+                "is_spare_part": False,
+                "section_name": "",
             }
         )
+
+    rows.extend(spare_parts)
     return rows
 
 
 def build_client_receiving_workbook(container_identifier, rows):
-    """Create the final .xlsx sent to the client, matching the current business layout."""
+    """Create the final customer receiving workbook with spare parts separated."""
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Receiving Container Data"
@@ -1149,7 +1334,8 @@ def build_client_receiving_workbook(container_identifier, rows):
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     yellow = PatternFill("solid", fgColor="FFFFFF00")
-    migration_orange = PatternFill("solid", fgColor="FFF4B183")
+    migration_green = PatternFill("solid", fgColor="FFC6EFCE")
+    spare_header_fill = PatternFill("solid", fgColor="FFD9E1F2")
 
     worksheet["B1"] = "Container:"
     worksheet["C1"] = str(container_identifier or "").strip()
@@ -1164,9 +1350,11 @@ def build_client_receiving_workbook(container_identifier, rows):
         cell.border = border
         cell.alignment = Alignment(horizontal="left", vertical="center")
 
-    start_row = 3
-    for offset, row in enumerate(rows):
-        row_number = start_row + offset
+    bike_rows = [row for row in rows if not row.get("is_spare_part")]
+    spare_rows = [row for row in rows if row.get("is_spare_part")]
+
+    row_number = 3
+    for row in bike_rows:
         values = [
             row.get("code", ""),
             row.get("item_name", ""),
@@ -1185,36 +1373,73 @@ def build_client_receiving_workbook(container_identifier, rows):
                 wrap_text=column == 3,
             )
             if row.get("is_pbp_to_pon"):
-                cell.fill = migration_orange
+                cell.fill = migration_green
         worksheet.row_dimensions[row_number].height = 19
+        row_number += 1
 
-    total_row = start_row + len(rows)
-    worksheet.cell(total_row, 3, "Total")
-    worksheet.cell(total_row, 4, sum(int(row.get("advised", 0) or 0) for row in rows))
-    worksheet.cell(total_row, 5, sum(int(row.get("received", 0) or 0) for row in rows))
-    worksheet.cell(total_row, 6, sum(int(row.get("variance", 0) or 0) for row in rows))
+    worksheet.cell(row_number, 3, "Bike Total" if spare_rows else "Total")
+    worksheet.cell(row_number, 4, sum(int(row.get("advised", 0) or 0) for row in bike_rows))
+    worksheet.cell(row_number, 5, sum(int(row.get("received", 0) or 0) for row in bike_rows))
+    worksheet.cell(row_number, 6, sum(int(row.get("variance", 0) or 0) for row in bike_rows))
     for column in range(3, 7):
-        cell = worksheet.cell(total_row, column)
-        cell.border = border
-        cell.font = Font(bold=column == 3, size=10)
-        cell.alignment = Alignment(horizontal="center" if column >= 4 else "left", vertical="center")
+        worksheet.cell(row_number, column).font = Font(bold=True, size=10)
+        worksheet.cell(row_number, column).border = border
+    row_number += 1
 
-    worksheet.column_dimensions["A"].width = 3
-    worksheet.column_dimensions["B"].width = 18
-    worksheet.column_dimensions["C"].width = 54
-    worksheet.column_dimensions["D"].width = 11
-    worksheet.column_dimensions["E"].width = 11
+    if spare_rows:
+        current_section = None
+        for row in spare_rows:
+            section = str(row.get("section_name", "") or "SPARE PARTS").strip()
+            if section != current_section:
+                if current_section is not None:
+                    row_number += 1
+                worksheet.merge_cells(start_row=row_number, start_column=2, end_row=row_number, end_column=7)
+                section_cell = worksheet.cell(row_number, 2, section)
+                section_cell.font = Font(bold=True, size=10)
+                section_cell.fill = spare_header_fill
+                section_cell.border = border
+                section_cell.alignment = Alignment(horizontal="left", vertical="center")
+                for column in range(2, 8):
+                    worksheet.cell(row_number, column).fill = spare_header_fill
+                    worksheet.cell(row_number, column).border = border
+                current_section = section
+                row_number += 1
+
+            values = [
+                row.get("code", ""),
+                row.get("item_name", ""),
+                int(row.get("advised", 0) or 0),
+                "",
+                "",
+                row.get("comment", "Not part of bike First Scan"),
+            ]
+            for column, value in enumerate(values, start=2):
+                cell = worksheet.cell(row_number, column, value)
+                cell.border = border
+                cell.font = Font(size=10)
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            worksheet.row_dimensions[row_number].height = 19
+            row_number += 1
+
+        worksheet.cell(row_number, 3, "Spare Parts Total")
+        worksheet.cell(row_number, 4, sum(int(row.get("advised", 0) or 0) for row in spare_rows))
+        for column in range(3, 7):
+            worksheet.cell(row_number, column).font = Font(bold=True, size=10)
+            worksheet.cell(row_number, column).border = border
+        row_number += 1
+
+    worksheet.column_dimensions["B"].width = 34
+    worksheet.column_dimensions["C"].width = 46
+    worksheet.column_dimensions["D"].width = 12
+    worksheet.column_dimensions["E"].width = 12
     worksheet.column_dimensions["F"].width = 10
-    worksheet.column_dimensions["G"].width = 22
-    worksheet.row_dimensions[1].height = 21
-    worksheet.row_dimensions[2].height = 20
+    worksheet.column_dimensions["G"].width = 27
     worksheet.freeze_panes = "B3"
-    worksheet.print_area = f"B1:G{total_row}"
+    worksheet.print_title_rows = "1:2"
     worksheet.page_setup.orientation = "portrait"
     worksheet.page_setup.fitToWidth = 1
     worksheet.page_setup.fitToHeight = 0
     worksheet.sheet_properties.pageSetUpPr.fitToPage = True
-    worksheet.oddFooter.center.text = "Page &P of &N"
 
     output = io.BytesIO()
     workbook.save(output)
@@ -1367,7 +1592,7 @@ def suggest_translogic_name(description, max_length=30, name_dictionary=None):
     return value
 
 
-def build_new_product_workbook(definitions, configuration, container_date):
+def build_new_product_workbook(definitions, configuration, container_date, pbp_to_pon_codes=None):
     """Build the exact 30-column Translogic New Product Import worksheet."""
     if not container_date:
         raise ValueError("Enter the container date before generating New Product Import.")
@@ -1376,6 +1601,10 @@ def build_new_product_workbook(definitions, configuration, container_date):
     worksheet.title = "New Product Import"
     worksheet.append(NEW_PRODUCT_HEADERS)
     threshold = Decimal(str(configuration["TL_GROUP2_CUBIC_THRESHOLD"]))
+
+    historical_pbp_codes = None if pbp_to_pon_codes is None else {
+        str(code or "").strip().upper() for code in pbp_to_pon_codes
+    }
 
     for product in definitions:
         if len(product.short_name) > 30:
@@ -1415,9 +1644,15 @@ def build_new_product_workbook(definitions, configuration, container_date):
             ]
         )
 
-        if getattr(product, "is_pbp_to_pon", False):
+        product_code = str(getattr(product, "code", "") or "").strip().upper()
+        is_historical_pbp = (
+            getattr(product, "is_pbp_to_pon", False)
+            if historical_pbp_codes is None
+            else product_code in historical_pbp_codes
+        )
+        if is_historical_pbp:
             for cell in worksheet[worksheet.max_row]:
-                cell.fill = PatternFill("solid", fgColor="FFF4B183")
+                cell.fill = PatternFill("solid", fgColor="FFFFFF00")
 
     yellow_fill = PatternFill("solid", fgColor="FFFFFF00")
     yellow_columns = {"A", "C", "D", "H", "J", "M", "P", "R", "S", "T", "U", "AA", "AD"}
@@ -1500,6 +1735,76 @@ def inspect_workbook(path):
                     preview.append({"row": row[0].row, "values": [str(v) if v is not None else "" for v in values[:12]]})
         sheets.append({"name": ws.title, "rows": ws.max_row, "columns": ws.max_column, "nonempty": nonempty, "preview": preview})
     return sheets
+
+
+def build_source_file_preview(path, sheet_name, start_row, start_column, mapping=None, row_limit=15, column_limit=12):
+    """Read a positional workbook window without importing or changing operational data."""
+    wb = _workbook(path)
+    try:
+        if sheet_name not in wb.sheetnames:
+            raise ValueError("The selected worksheet is not present in the source file.")
+        ws = wb[sheet_name]
+        first_row = max(1, int(start_row))
+        first_column = column_index_from_string(str(start_column or "A").strip().upper())
+        if row_limit < 1 or column_limit < 1:
+            raise ValueError("Preview limits must be positive.")
+
+        last_column = min(max(ws.max_column, first_column), first_column + column_limit - 1)
+        last_row = min(ws.max_row, first_row + row_limit - 1)
+        current_mapping = dict(mapping or {})
+        header_row = int(current_mapping.get("_header_row") or 0)
+        meanings = (
+            ("code_column", "Product / Main Code"),
+            ("long_code_column", "Long / Secondary Code"),
+            ("description_column", "Description"),
+            ("quantity_column", "Quantity"),
+            ("container_column", "Container"),
+        )
+        mapped_by_column = defaultdict(list)
+        for field, label in meanings:
+            column = str(current_mapping.get(field) or "").strip().upper()
+            if column:
+                mapped_by_column[column].append(label)
+        if current_mapping.get("location_stream"):
+            column = str(current_mapping.get("code_column") or "").strip().upper()
+            if column:
+                mapped_by_column[column].append("Pallet / Location stream")
+
+        columns = []
+        for column_number in range(first_column, last_column + 1):
+            letter = get_column_letter(column_number)
+            original_header = ""
+            if 1 <= header_row <= ws.max_row:
+                value = ws.cell(header_row, column_number).value
+                original_header = str(value).strip() if value not in (None, "") else ""
+            columns.append({
+                "letter": letter,
+                "original_header": original_header,
+                "meaning": " / ".join(mapped_by_column.get(letter, [])) or "Not mapped",
+            })
+
+        rows = []
+        if first_row <= ws.max_row:
+            for row_number in range(first_row, last_row + 1):
+                rows.append({
+                    "number": row_number,
+                    "values": [
+                        "" if ws.cell(row_number, column_number).value is None else str(ws.cell(row_number, column_number).value)
+                        for column_number in range(first_column, last_column + 1)
+                    ],
+                })
+        first_letter = get_column_letter(first_column)
+        return {
+            "worksheet": ws.title,
+            "start_row": first_row,
+            "start_column": first_letter,
+            "first_cell": f"{first_letter}{first_row}",
+            "header_row": header_row,
+            "columns": columns,
+            "rows": rows,
+        }
+    finally:
+        wb.close()
 
 
 def normalize_container_identifier(value):
@@ -1660,6 +1965,130 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
     wb = _workbook(path)
     known = {re.sub(r"\s+", "", str(v).upper()) for v in (known_product_codes or set()) if v}
 
+    # Headerless 2-CODES scanner files use one physical Code column plus one
+    # LongCode column. Pallet rows (T9999) can be interleaved in the Code column,
+    # therefore the first real source row must be preserved instead of being
+    # mistaken for a header row.
+    if kind == "RECEIVED":
+        paired_candidates = []
+        for ws in wb.worksheets:
+            if sheet_name and ws.title != sheet_name:
+                continue
+            max_cols = min(ws.max_column, 12)
+            max_rows = min(ws.max_row, 500)
+            for code_column_number in range(1, max_cols + 1):
+                for long_column_number in range(1, max_cols + 1):
+                    if long_column_number == code_column_number:
+                        continue
+                    first_row = None
+                    product_rows = 0
+                    long_hits = 0
+                    location_hits = 0
+                    paired_rows = 0
+                    code_nonempty = 0
+                    long_nonempty = 0
+                    for row_number in range(1, max_rows + 1):
+                        code_value = ws.cell(row_number, code_column_number).value
+                        long_value = ws.cell(row_number, long_column_number).value
+                        if code_value not in (None, "") and first_row is None:
+                            first_row = row_number
+                        if code_value not in (None, ""):
+                            code_nonempty += 1
+                        if long_value not in (None, ""):
+                            long_nonempty += 1
+                        code_text = re.sub(r"\s+", "", str(code_value or "").strip().upper())
+                        long_text = str(long_value or "").strip().upper()
+                        if LOCATION_PATTERN.fullmatch(code_text):
+                            location_hits += 1
+                            continue
+                        if PRODUCT_CODE_PATTERN.fullmatch(code_text):
+                            product_rows += 1
+                            if long_value not in (None, ""):
+                                paired_rows += 1
+                                if is_pon_long_code(long_text):
+                                    long_hits += 1
+                    if product_rows < 2 or paired_rows < 2 or not first_row:
+                        continue
+                    long_ratio = long_hits / paired_rows
+                    paired_ratio = paired_rows / product_rows
+                    if long_ratio < 0.70 or paired_ratio < 0.70:
+                        continue
+                    other_nonempty = 0
+                    for other_col in range(1, max_cols + 1):
+                        if other_col in {code_column_number, long_column_number}:
+                            continue
+                        other_nonempty += sum(
+                            1 for row_number in range(1, max_rows + 1)
+                            if ws.cell(row_number, other_col).value not in (None, "")
+                        )
+                    if other_nonempty > max(8, int((code_nonempty + long_nonempty) * 0.15)):
+                        continue
+                    paired_candidates.append({
+                        "sheet": ws,
+                        "code_column": get_column_letter(code_column_number),
+                        "long_column": get_column_letter(long_column_number),
+                        "first_row": first_row,
+                        "products": product_rows,
+                        "locations": location_hits,
+                        "long_hits": long_hits,
+                        "score": (long_ratio * 100) + (paired_ratio * 50) + min(location_hits, 25),
+                    })
+        if paired_candidates:
+            best_pair = max(paired_candidates, key=lambda item: item["score"])
+            ws = best_pair["sheet"]
+            signature_raw = f"two-code-scan-stream|{best_pair['code_column']}|{best_pair['long_column']}"
+            signature = hashlib.sha256(signature_raw.encode("utf-8")).hexdigest()[:24]
+            suggestion = {
+                "sheet_name": ws.title,
+                "start_row": best_pair["first_row"],
+                "start_column": best_pair["code_column"],
+                "row_step": 1,
+                "code_column": best_pair["code_column"],
+                "long_code_column": best_pair["long_column"],
+                "description_column": "",
+                "quantity_column": "",
+                "container_column": "",
+                "coloured_rows_only": False,
+                "required_fill_signature": "",
+                "location_stream": True,
+            }
+            profile_match = None
+            for profile in saved_profiles or []:
+                profile_mapping = dict(getattr(profile, "mapping", {}) or {})
+                if profile_mapping.get("_structure_signature") == signature:
+                    for key in ("start_column", "row_step", "code_column", "long_code_column", "description_column", "quantity_column", "location_stream"):
+                        if key in profile_mapping:
+                            suggestion[key] = profile_mapping[key]
+                    profile_match = getattr(profile, "name", "Saved profile")
+                    break
+            confidence = {
+                "code_column": 100, "long_code_column": 100, "description_column": 0,
+                "quantity_column": 0, "container_column": 0,
+            }
+            suggestion["_structure_signature"] = signature
+            suggestion["_header_row"] = 0
+            suggestion["_mapping_confidence"] = confidence
+            suggestion["_analysis_version"] = "2026.10"
+            return {
+                "mapping": suggestion,
+                "confidence": confidence,
+                "field_labels": {
+                    "code_column": f"{best_pair['code_column']} · Bike Code / pallet stream",
+                    "long_code_column": f"{best_pair['long_column']} · LongCode",
+                    "description_column": "Not required for scanned bikes",
+                    "quantity_column": "Not required; each bike is one unit",
+                    "container_column": "Not applicable",
+                },
+                "worksheet": ws.title,
+                "header_row": 0,
+                "data_rows": best_pair["products"],
+                "bike_units": best_pair["products"],
+                "spare_units": 0,
+                "containers": [],
+                "profile_match": profile_match,
+                "structure_signature": signature,
+            }
+
     # Preserve the warehouse single-column First Scan format: T9999 rows change location,
     # bike codes follow underneath. This format has no header row and must start at row 1.
     if kind == "RECEIVED":
@@ -1712,6 +2141,7 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
             suggestion = {
                 "sheet_name": ws.title,
                 "start_row": best_stream["first_row"],
+                "start_column": best_stream["column"],
                 "row_step": 1,
                 "code_column": best_stream["column"],
                 "long_code_column": "",
@@ -1726,7 +2156,7 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
             for profile in saved_profiles or []:
                 profile_mapping = dict(getattr(profile, "mapping", {}) or {})
                 if profile_mapping.get("_structure_signature") == signature:
-                    for key in ("row_step", "code_column", "long_code_column", "description_column", "quantity_column", "location_stream"):
+                    for key in ("start_column", "row_step", "code_column", "long_code_column", "description_column", "quantity_column", "location_stream"):
                         if key in profile_mapping:
                             suggestion[key] = profile_mapping[key]
                     profile_match = getattr(profile, "name", "Saved profile")
@@ -1752,6 +2182,8 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
                 "worksheet": ws.title,
                 "header_row": 0,
                 "data_rows": best_stream["products"],
+                "bike_units": best_stream["products"],
+                "spare_units": 0,
                 "containers": [],
                 "profile_match": profile_match,
                 "structure_signature": signature,
@@ -1767,9 +2199,14 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
         raise ValueError("No readable worksheet was found.")
     analysis = max(candidates, key=lambda item: item["score"])
     ws = analysis["sheet"]
+    first_source_column = next(
+        (column["letter"] for column in analysis["columns"] if column["header"] or column["profile"]["nonempty"]),
+        "A",
+    )
     suggestion = {
         "sheet_name": ws.title,
         "start_row": analysis["start_row"],
+        "start_column": first_source_column,
         "row_step": 1,
         "code_column": analysis["mapping"]["code_column"],
         "long_code_column": analysis["mapping"]["long_code_column"],
@@ -1785,7 +2222,7 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
     for profile in saved_profiles or []:
         profile_mapping = dict(getattr(profile, "mapping", {}) or {})
         if profile_mapping.get("_structure_signature") == signature:
-            for key in ("row_step", "code_column", "long_code_column", "description_column", "quantity_column", "container_column", "coloured_rows_only", "required_fill_signature", "location_stream"):
+            for key in ("start_column", "row_step", "code_column", "long_code_column", "description_column", "quantity_column", "container_column", "coloured_rows_only", "required_fill_signature", "location_stream"):
                 if key in profile_mapping:
                     suggestion[key] = profile_mapping[key]
             for field in analysis["confidence"]:
@@ -1808,24 +2245,39 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
             suggestion["coloured_rows_only"] = True
             suggestion["required_fill_signature"] = max(green_signatures, key=green_signatures.get)
 
-    detected = defaultdict(lambda: {"rows": 0, "units": 0})
+    detected = defaultdict(lambda: {"rows": 0, "units": 0, "spare_units": 0})
     data_rows = 0
-    code_col = suggestion.get("code_column")
+    bike_units = 0
+    spare_units = 0
+    identifier_col = suggestion.get("code_column") or suggestion.get("long_code_column")
     container_col = suggestion.get("container_column")
     quantity_col = suggestion.get("quantity_column")
-    if code_col:
+    current_section = ""
+    if identifier_col:
         for row_number in range(int(suggestion["start_row"]), ws.max_row + 1, int(suggestion.get("row_step") or 1)):
-            code = ws[f"{code_col}{row_number}"].value
+            section = _manifest_section_value(ws, suggestion, row_number) if kind == "CLIENT" else ""
+            if section:
+                current_section = section
+                continue
+            code = ws[f"{identifier_col}{row_number}"].value
             if code in (None, ""):
                 continue
             data_rows += 1
+            qty_raw = ws[f"{quantity_col}{row_number}"].value if quantity_col else 1
+            units = int(Decimal(str(qty_raw))) if _positive_whole_number(qty_raw) else 1
+            is_spare = kind == "CLIENT" and is_non_scannable_manifest_section(current_section)
+            if is_spare:
+                spare_units += units
+            else:
+                bike_units += units
             if kind == "CLIENT" and container_col:
                 identifier = normalize_container_identifier(ws[f"{container_col}{row_number}"].value)
                 if identifier:
-                    qty_raw = ws[f"{quantity_col}{row_number}"].value if quantity_col else 1
-                    units = int(Decimal(str(qty_raw))) if _positive_whole_number(qty_raw) else 1
                     detected[identifier]["rows"] += 1
-                    detected[identifier]["units"] += units
+                    if is_spare:
+                        detected[identifier]["spare_units"] += units
+                    else:
+                        detected[identifier]["units"] += units
 
     headers_by_letter = {c["letter"]: c["header"] for c in analysis["columns"]}
     field_labels = {}
@@ -1844,8 +2296,15 @@ def analyse_workbook_mapping(path, kind, known_product_codes=None, saved_profile
         "worksheet": ws.title,
         "header_row": analysis["header_row"],
         "data_rows": data_rows,
+        "bike_units": bike_units,
+        "spare_units": spare_units,
         "containers": [
-            {"identifier": identifier, "rows": values["rows"], "units": values["units"]}
+            {
+                "identifier": identifier,
+                "rows": values["rows"],
+                "units": values["units"],
+                "spare_units": values["spare_units"],
+            }
             for identifier, values in sorted(detected.items())
         ],
         "profile_match": profile_match,
@@ -1964,21 +2423,58 @@ def _quantity(value):
     return int(number)
 
 
+def _manifest_section_value(ws, mapping, row_number):
+    """Return a repeated section label without hard-coding customer group names."""
+    mapped_columns = []
+    for field in ("code_column", "long_code_column", "description_column", "quantity_column"):
+        column = str(mapping.get(field, "") or "").strip().upper()
+        if column and column not in mapped_columns:
+            mapped_columns.append(column)
+    values = [_clean_text(_value(ws, column, row_number)) for column in mapped_columns]
+    values = [value for value in values if value]
+    if len(values) < 2:
+        return ""
+    normalised = [re.sub(r"\s+", " ", value).strip().upper() for value in values]
+    if len(set(normalised)) != 1:
+        return ""
+    quantity_value = _value(ws, mapping.get("quantity_column", ""), row_number)
+    try:
+        _quantity(quantity_value)
+    except ValueError:
+        return re.sub(r"\s+", " ", values[0]).strip()
+    return ""
+
+
 def parse_workbook(path, mapping):
     wb = _workbook(path)
     ws = wb[mapping["sheet_name"]]
     start_row = int(mapping.get("start_row") or 1)
     row_step = int(mapping.get("row_step") or 1)
-    code_column = mapping.get("code_column", "A").upper()
+    code_column = (mapping.get("code_column") or "").upper()
+    long_code_column = (mapping.get("long_code_column") or "").upper()
+    identifier_column = code_column or long_code_column
     coloured_only = bool(mapping.get("coloured_rows_only"))
     required_fill = mapping.get("required_fill_signature", "")
     location_stream = bool(mapping.get("location_stream"))
     current_location = ""
+    current_section = ""
     rows = []
     errors = []
 
+    # A configured first data row can intentionally start below a visible
+    # section heading. Read only the preceding labels so the first product row
+    # still retains its source section; no source row is rewritten or merged.
+    for prior_row in range(1, start_row):
+        section = _manifest_section_value(ws, mapping, prior_row)
+        if section:
+            current_section = section
+
     for row_number in range(start_row, ws.max_row + 1, row_step):
-        raw_code = _value(ws, code_column, row_number)
+        section = _manifest_section_value(ws, mapping, row_number)
+        if section:
+            current_section = section
+            continue
+        raw_code = _value(ws, identifier_column, row_number)
         code = _clean_text(raw_code).upper()
         if not code:
             continue
@@ -2016,13 +2512,15 @@ def parse_workbook(path, mapping):
             cell = ws.cell(row_number, col)
             if cell.value not in (None, ""):
                 raw_data[cell.column_letter] = _clean_text(cell.value)
+        if current_section:
+            raw_data["_manifest_section"] = current_section
 
         rows.append(
             {
                 "source_sheet": ws.title,
                 "source_row": row_number,
                 "code": code,
-                "long_code": _clean_text(_value(ws, mapping.get("long_code_column", ""), row_number)).upper(),
+                "long_code": _clean_text(_value(ws, long_code_column, row_number)).upper(),
                 "description": _clean_text(_value(ws, mapping.get("description_column", ""), row_number)),
                 "quantity": quantity,
                 "location": current_location,
@@ -2034,13 +2532,36 @@ def parse_workbook(path, mapping):
     return rows, errors
 
 
-def compare_lines(client_lines, received_lines):
+def compare_lines(client_lines, received_lines, two_codes=None):
+    client_lines = list(client_lines)
+    received_lines = list(received_lines)
+    if two_codes is None:
+        two_codes = _uses_two_code_reconciliation(received_lines)
     expected = defaultdict(int)
     received = defaultdict(int)
+    source_rows = defaultdict(list)
+    sections = defaultdict(list)
+    physical_codes = defaultdict(set)
     for line in client_lines:
-        expected[line.code] += line.quantity
+        if is_non_scannable_manifest_line(line):
+            continue
+        code = _line_reconciliation_code(line, use_long_code=two_codes)
+        if not code or (two_codes and not is_pon_long_code(code)):
+            continue
+        expected[code] += line.quantity
+        source_rows[code].append(line.source_row)
+        section = manifest_section(line)
+        if section and section not in sections[code]:
+            sections[code].append(section)
     for line in received_lines:
-        received[line.code] += line.quantity
+        code = _line_reconciliation_code(line, use_long_code=two_codes)
+        if not code:
+            continue
+        received[code] += line.quantity
+        if two_codes:
+            physical_code = str(getattr(line, "code", "") or "").strip().upper()
+            if physical_code:
+                physical_codes[code].add(physical_code)
 
     result = []
     for code in sorted(set(expected) | set(received)):
@@ -2051,10 +2572,27 @@ def compare_lines(client_lines, received_lines):
         elif rec == 0:
             status = "MISSING"
         elif exp == 0:
-            status = "UNEXPECTED"
+            status = "UNADVISED" if two_codes else "UNEXPECTED"
         elif rec < exp:
             status = "SHORT"
         else:
             status = "OVER"
-        result.append({"code": code, "expected": exp, "received": rec, "difference": rec - exp, "status": status})
+        quantity_status = status
+        observed_codes = sorted(physical_codes.get(code, set()))
+        warning = ""
+        if len(observed_codes) > 1:
+            status = "REVIEW"
+            warning = "Long Code observed with multiple physical Codes: " + ", ".join(observed_codes)
+        result.append({
+            "code": code,
+            "expected": exp,
+            "received": rec,
+            "difference": rec - exp,
+            "status": status,
+            "quantity_status": quantity_status,
+            "warning": warning,
+            "physical_codes": observed_codes,
+            "sections": sections.get(code, []),
+            "source_rows": source_rows.get(code, []),
+        })
     return result

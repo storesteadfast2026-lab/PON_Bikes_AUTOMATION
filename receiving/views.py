@@ -19,7 +19,6 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.urls import reverse
-from openpyxl.utils import get_column_letter
 
 from .forms import (
     ContainerForm,
@@ -52,22 +51,29 @@ from .models import (
 )
 from .services import (
     PRODUCT_CATALOG_PATTERN,
+    PRODUCT_CODE_PATTERN,
     LOCATION_PATTERN,
     EXPORT_DEFAULTS,
     analyse_workbook_mapping,
     available_server_files,
+    _group_product_rows_by_code,
     build_product_check_workbook,
     build_new_product_workbook,
     build_name_dictionary,
     build_client_receiving_workbook,
     build_client_report_rows,
     build_upstockserial_csv,
+    build_source_file_preview,
     classify_product_codes,
     compare_products_to_catalog,
     compare_lines,
     convert_excel_output,
     file_sha256,
+    first_scan_expected_units,
     inspect_workbook,
+    is_non_scannable_manifest_line,
+    is_pon_long_code,
+    manifest_section,
     parse_product_catalog,
     pbp_to_pon_product_data,
     parse_product_moves_csv,
@@ -75,11 +81,13 @@ from .services import (
     path_sha256,
     product_check_summary,
     reconcile_product_movements,
+    resolve_client_report_two_codes,
     normalize_container_identifier,
     resolve_group1_family,
     resolve_server_file,
     suggest_mapping,
     suggest_translogic_name,
+    summarize_import_rows,
 )
 from .translogic_transfer import copy_file_verified, discover_numbered_import_set, sha256_file
 
@@ -201,15 +209,31 @@ def _source_mapping_analysis(source):
     )
 
 
+def _batch_quantity_summary(rows):
+    return summarize_import_rows(rows)
+
+
+def _batch_total_units(source_kind, rows):
+    rows = list(rows)
+    summary = _batch_quantity_summary(rows)
+    return summary["bike_units"] if source_kind == "CLIENT" else sum(
+        int((row.get("quantity", 0) if isinstance(row, dict) else getattr(row, "quantity", 0)) or 0)
+        for row in rows
+    )
+
+
 def _container_preview_groups(batch):
     groups = {}
     for line in batch.lines.all().order_by("source_row"):
         identifier = line.container_identifier or ""
         if not identifier:
             continue
-        group = groups.setdefault(identifier, {"identifier": identifier, "rows": 0, "units": 0})
+        group = groups.setdefault(identifier, {"identifier": identifier, "rows": 0, "units": 0, "spare_units": 0})
         group["rows"] += 1
-        group["units"] += line.quantity
+        if batch.source_file.kind == "CLIENT" and is_non_scannable_manifest_line(line):
+            group["spare_units"] += line.quantity
+        else:
+            group["units"] += line.quantity
     current = normalize_container_identifier(batch.container.identifier)
     result = []
     for identifier in sorted(groups):
@@ -249,7 +273,7 @@ def _confirm_multi_container_manifest(batch, user):
     current_lines = groups[current_identifier]
     batch.lines.exclude(pk__in=[line.pk for line in current_lines]).delete()
     batch.total_rows = len(current_lines)
-    batch.total_units = sum(line.quantity for line in current_lines)
+    batch.total_units = _batch_total_units(source.kind, current_lines)
     batch.save(update_fields=["total_rows", "total_units"])
     current_container.manifest_source_name = source.original_name
     current_container.save(update_fields=["manifest_source_name"])
@@ -314,7 +338,7 @@ def _confirm_multi_container_manifest(batch, user):
             status="CONFIRMED",
             mapping=batch.mapping,
             total_rows=len(lines),
-            total_units=sum(line.quantity for line in lines),
+            total_units=_batch_total_units("CLIENT", lines),
             created_by=user,
             confirmed_at=timezone.now(),
         )
@@ -587,6 +611,24 @@ def _closed_container_guard(request, container):
     return redirect("receiving:container_detail", pk=container.pk)
 
 
+# PON_PRODUCT_MOVES_REFRESH_GUARD_1008.1200
+def _product_moves_local_refresh_is_stale(active_import, source_path, content, direct_source=False):
+    """Protect a newer manual upload from an older local fallback working copy."""
+    if direct_source or not active_import or active_import.source_path != "manual upload":
+        return False
+    local_digest = hashlib.sha256(content).hexdigest()
+    if local_digest == active_import.sha256:
+        return False
+    try:
+        local_mtime = datetime.fromtimestamp(
+            source_path.stat().st_mtime,
+            tz=timezone.get_current_timezone(),
+        )
+    except OSError:
+        return True
+    return bool(active_import.imported_at and local_mtime <= active_import.imported_at)
+
+
 def _activate_product_moves(container, user, content, original_name="PRODUCT_MOVES.CSV", source_path=""):
     rows = parse_product_moves_csv(io.BytesIO(content))
     digest = hashlib.sha256(content).hexdigest()
@@ -639,24 +681,33 @@ def _client_report_data(container):
     catalog = _active_catalog_for_customer(container.customer)
     rows = []
     if client_batch and received_batch and catalog:
+        client_lines = list(client_batch.lines.all())
+        received_lines = list(received_batch.lines.all())
+        two_codes = resolve_client_report_two_codes(
+            client_lines,
+            received_lines,
+            configured_two_codes=_first_scan_two_codes(container),
+        )
+
         codes = {
-            str(code or "").strip().upper()
-            for code in list(client_batch.lines.values_list("code", flat=True))
-            + list(received_batch.lines.values_list("code", flat=True))
-            if str(code or "").strip()
+            str(value or "").strip().upper()
+            for line in client_lines + received_lines
+            for value in (getattr(line, "code", ""), getattr(line, "long_code", ""))
+            if str(value or "").strip()
         }
         definitions = ProductDefinition.objects.filter(code__in=codes)
         status_rows = {item.code: item.was_new for item in container.product_statuses.filter(code__in=codes)}
         catalog_entries = list(catalog.entries.all())
         classifications = classify_product_codes(codes, catalog_entries, target_customer=container.customer.code)
         rows = build_client_report_rows(
-            client_batch.lines.all(),
-            received_batch.lines.all(),
+            client_lines,
+            received_lines,
             catalog_entries,
             definitions,
             product_statuses=status_rows,
             product_classifications=classifications,
             target_customer=container.customer.code,
+            two_codes=two_codes,
         )
     return client_batch, received_batch, catalog, rows
 
@@ -687,6 +738,7 @@ def _container_workspace_data(container):
     comparison_rows = compare_lines(
         client_batch.lines.all() if client_batch else [],
         received_batch.lines.all() if received_batch else [],
+        two_codes=_first_scan_two_codes(container),
     )
     expected_units = sum(row["expected"] for row in comparison_rows)
     received_units = sum(row["received"] for row in comparison_rows)
@@ -712,12 +764,21 @@ def _container_workspace_data(container):
     }
     pending_new_codes = [code for code in definition_required_codes if code not in definitions]
     group1_rules = list(Group1Family.objects.filter(active=True).order_by("-priority", "family_name"))
+    manifest_group1_rule = _manifest_header_group1_rule(client_batch, group1_rules)
+    manifest_group1_resolution = _group1_resolution_from_manifest_rule(
+        manifest_group1_rule,
+        (AppSetting.objects.filter(key="TL_CUSTOMER").values_list("value", flat=True).first()
+         or EXPORT_DEFAULTS["TL_CUSTOMER"]),
+    )
     migration_group1_ready = all(
-        resolve_group1_family(
-            (row.get("pbp_to_pon_data") or {}).get("long_name")
-            or getattr(definitions.get(row["code"]), "full_name", ""),
-            "PON",
-            group1_rules,
+        (
+            manifest_group1_resolution
+            or resolve_group1_family(
+                (row.get("pbp_to_pon_data") or {}).get("long_name")
+                or getattr(definitions.get(row["code"]), "full_name", ""),
+                "PON",
+                group1_rules,
+            )
         ).get("resolved")
         for row in migration_rows
         if (row.get("pbp_to_pon_data") or {}).get("valid") or definitions.get(row["code"])
@@ -735,7 +796,11 @@ def _container_workspace_data(container):
             or EXPORT_DEFAULTS["TL_CUSTOMER"]
         )
         normal_new_group1_ready = all(
-            resolve_group1_family(definitions[code].full_name, tl_customer, group1_rules).get("resolved")
+            (manifest_group1_resolution or resolve_group1_family(
+                definitions[code].full_name,
+                tl_customer,
+                group1_rules,
+            )).get("resolved")
             for code in new_codes
         )
         new_product_import_download_ready = normal_new_group1_ready and migration_group1_ready
@@ -803,6 +868,24 @@ def _container_workspace_data(container):
         else container.source_files.filter(kind="RECEIVED").first()
     )
 
+    manifest_summary = summarize_import_rows(client_batch.lines.all()) if client_batch else {
+        "data_rows": 0, "bike_rows": 0, "bike_units": 0, "spare_rows": 0, "spare_units": 0
+    }
+    pallet_events = list(
+        FirstScanEvent.objects.filter(
+            session__container=container,
+            event_type="PALLET",
+            result="SUCCESS",
+        ).exclude(pallet="").order_by("scanned_at", "pk").values_list("pallet", flat=True)
+    )
+    pallet_sequence = []
+    pallet_seen = set()
+    for pallet in pallet_events:
+        key = str(pallet or "").strip().upper()
+        if key and key not in pallet_seen:
+            pallet_seen.add(key)
+            pallet_sequence.append(key)
+
     upstock_transfer = _upstock_transfer_status(container)
     new_product_transfer = _new_product_transfer_status(container)
     direct_moves = _direct_product_moves_path()
@@ -814,6 +897,12 @@ def _container_workspace_data(container):
         "received_source": received_source,
         "expected_units": expected_units,
         "received_units": received_units,
+        "manifest_data_rows": manifest_summary["data_rows"],
+        "manifest_bike_units": manifest_summary["bike_units"],
+        "manifest_spare_units": manifest_summary["spare_units"],
+        "pallet_count": len(pallet_sequence),
+        "first_pallet": pallet_sequence[0] if pallet_sequence else "",
+        "last_pallet": pallet_sequence[-1] if pallet_sequence else "",
         "variance": variance,
         "exception_count": exception_count,
         "catalog": catalog,
@@ -1105,8 +1194,9 @@ def _first_scan_product_from_code(container, batch, value):
     for candidate_batch in (client_batch, batch):
         if not candidate_batch:
             continue
-        line = candidate_batch.lines.filter(code__iexact=value).exclude(code="").first()
-        if line:
+        for line in candidate_batch.lines.filter(code__iexact=value).exclude(code="").order_by("source_row", "pk"):
+            if candidate_batch == client_batch and is_non_scannable_manifest_line(line):
+                continue
             return {"code": line.code.strip().upper(), "long_code": line.long_code.strip().upper()}
 
     definition = ProductDefinition.objects.filter(code__iexact=value).first()
@@ -1128,8 +1218,9 @@ def _first_scan_product_from_long_code(container, batch, value):
     for candidate_batch in (client_batch, batch):
         if not candidate_batch:
             continue
-        line = candidate_batch.lines.filter(long_code__iexact=value).exclude(long_code="").first()
-        if line:
+        for line in candidate_batch.lines.filter(long_code__iexact=value).exclude(long_code="").order_by("source_row", "pk"):
+            if candidate_batch == client_batch and is_non_scannable_manifest_line(line):
+                continue
             return {"code": line.code.strip().upper(), "long_code": line.long_code.strip().upper()}
 
     definition = ProductDefinition.objects.filter(long_code__iexact=value).exclude(long_code="").first()
@@ -1162,10 +1253,32 @@ def _first_scan_pause_seconds(session, end_time=None):
     return total
 
 
+def _first_scan_two_codes(container):
+    return str(container.first_scan_code_mode or "ONE_CODE").upper() == "TWO_CODES"
+
+
+def _pending_two_code_event(session):
+    return session.events.filter(
+        event_type="BIKE",
+        result="WARNING",
+        normalized_line__isnull=True,
+        message__startswith="Waiting for Long Code",
+    ).order_by("-scanned_at", "-pk").first()
+
+
+def _first_scan_expected_total(container, client_batch):
+    if not client_batch:
+        return None
+    return first_scan_expected_units(
+        client_batch.lines.all(),
+        two_codes=_first_scan_two_codes(container),
+    )
+
+
 def _first_scan_state(session):
     session.batch.refresh_from_db(fields=["total_rows", "total_units"])
     client_batch = _first_scan_client_batch(session.container)
-    expected_total = client_batch.total_units if client_batch else None
+    expected_total = _first_scan_expected_total(session.container, client_batch)
     current_total = session.batch.total_units
     completion = min(100, round((current_total / expected_total) * 100)) if expected_total else 0
     pallet_total = 0
@@ -1183,19 +1296,65 @@ def _first_scan_state(session):
     end_time = session.finished_at or timezone.now()
     elapsed_seconds = max(0, int((end_time - session.started_at).total_seconds()))
     paused_seconds = _first_scan_pause_seconds(session, end_time)
+    # Keep the live screen minimal: the recent list is the operator's visual
+    # confirmation, so show the latest completed bikes across pallets instead of
+    # repeating only the current pallet. Scanner/registration behaviour is unchanged.
     recent = []
-    if session.current_pallet:
-        for event in session.events.filter(event_type="BIKE", pallet__iexact=session.current_pallet)[:10]:
-            recent.append({
-                "id": event.pk,
-                "time": timezone.localtime(event.scanned_at).strftime("%H:%M:%S"),
-                "input_type": event.get_input_type_display(),
-                "scanned_value": event.scanned_value,
-                "resolved_code": event.resolved_code,
-                "result": event.result.lower(),
-                "message": event.message,
-            })
+    for event in session.events.filter(
+        event_type="BIKE",
+        normalized_line__isnull=False,
+    ).order_by("-scanned_at", "-pk")[:10]:
+        recent.append({
+            "id": event.pk,
+            "time": timezone.localtime(event.scanned_at).strftime("%H:%M:%S"),
+            "input_type": event.get_input_type_display(),
+            "scanned_value": event.scanned_value,
+            "resolved_code": event.resolved_code,
+            "long_code": event.long_code,
+            "pallet": event.pallet,
+            "result": event.result.lower(),
+            "message": event.message,
+        })
+    pallet_events = list(
+        session.events.filter(event_type="PALLET", result="SUCCESS")
+        .exclude(pallet="")
+        .order_by("scanned_at", "pk")
+        .values_list("pallet", flat=True)
+    )
+    unique_pallets = []
+    seen_pallets = set()
+    for pallet in pallet_events:
+        key = str(pallet or "").strip().upper()
+        if key and key not in seen_pallets:
+            seen_pallets.add(key)
+            unique_pallets.append(key)
+
+    current_pallet_key = str(session.current_pallet or "").strip().upper()
+    pallet_position = (unique_pallets.index(current_pallet_key) + 1) if current_pallet_key in unique_pallets else 0
+
+    # A denominator is displayed only when a source already supplies a reliable
+    # complete pallet set. A live scanner-created batch is intentionally treated
+    # as unknown so the UI never displays a misleading 7/7 while pallet 8 is yet
+    # to be scanned.
+    expected_pallet_count = None
+    pallet_sources = []
+    batch_mapping = dict(session.batch.mapping or {})
+    if not batch_mapping.get("scanner"):
+        pallet_sources.append(session.batch)
+    if client_batch and client_batch.pk != session.batch.pk:
+        pallet_sources.append(client_batch)
+    for pallet_source in pallet_sources:
+        known = set()
+        for location in pallet_source.lines.exclude(location="").values_list("location", flat=True):
+            key = str(location or "").strip().upper()
+            if key and LOCATION_PATTERN.fullmatch(key):
+                known.add(key)
+        if known:
+            expected_pallet_count = len(known)
+            break
+
     last_event = session.events.first()
+    pending_event = _pending_two_code_event(session) if _first_scan_two_codes(session.container) else None
     last_scan = None
     if last_event:
         last_scan = {
@@ -1211,6 +1370,9 @@ def _first_scan_state(session):
         "session_id": session.pk,
         "status": session.status,
         "mode": session.get_mode_display(),
+        "code_mode": session.container.first_scan_code_mode or "ONE_CODE",
+        "code_mode_label": "2 CODES" if _first_scan_two_codes(session.container) else "1 CODE",
+        "pending_main_code": pending_event.resolved_code if pending_event else "",
         "current_pallet": session.current_pallet,
         "expected_total": expected_total,
         "current_total": current_total,
@@ -1218,6 +1380,11 @@ def _first_scan_state(session):
         "pallet_total": pallet_total,
         "pallet_expected": pallet_expected,
         "pallet_completion": pallet_completion,
+        "pallet_count": len(unique_pallets),
+        "pallet_position": pallet_position,
+        "expected_pallet_count": expected_pallet_count,
+        "first_pallet": unique_pallets[0] if unique_pallets else "",
+        "last_pallet": unique_pallets[-1] if unique_pallets else "",
         "elapsed_seconds": elapsed_seconds,
         "paused_seconds": paused_seconds,
         "active_seconds": max(0, elapsed_seconds - paused_seconds),
@@ -1238,6 +1405,135 @@ def _first_scan_error_event(session, value, message, input_type="CODE"):
     )
 
 
+def _complete_two_code_bike(session, pending, long_code):
+    client_batch = _first_scan_client_batch(session.container)
+    manifest_lines = client_batch.lines.filter(
+        Q(long_code__iexact=long_code) | Q(code__iexact=long_code)
+    ).order_by("source_row", "pk") if client_batch else []
+    manifest_lines = list(manifest_lines)
+    non_scannable_lines = [line for line in manifest_lines if is_non_scannable_manifest_line(line)]
+    manifest_lines = [line for line in manifest_lines if not is_non_scannable_manifest_line(line)]
+    if non_scannable_lines and not manifest_lines:
+        sections = sorted({manifest_section(line).strip() for line in non_scannable_lines if manifest_section(line).strip()})
+        section_label = ", ".join(sections) or "SPARE PARTS"
+        event = _first_scan_error_event(
+            session,
+            long_code,
+            f"{long_code} belongs to non-scannable manifest section {section_label}. No bike was completed.",
+            "LONG_CODE",
+        )
+        return False, "error", event.message, event
+    advised = sum(int(line.quantity or 0) for line in manifest_lines if is_pon_long_code(line.long_code or line.code))
+    scanned = session.batch.lines.filter(long_code__iexact=long_code).aggregate(total=Sum("quantity"))["total"] or 0
+    observed_codes = set(
+        session.batch.lines.filter(long_code__iexact=long_code).exclude(code="").values_list("code", flat=True)
+    )
+    observed_codes.add(pending.resolved_code)
+
+    warnings = []
+    if advised == 0:
+        warnings.append("UNADVISED / NOT ADVISED")
+    elif scanned >= advised:
+        warnings.append(f"over received: {scanned + 1} received / {advised} advised")
+    if len(observed_codes) > 1:
+        warnings.append("Long Code observed with more than one physical Code")
+
+    manifest_line = manifest_lines[0] if manifest_lines else None
+    scanned_at = timezone.now()
+    next_source_row = (session.batch.lines.aggregate(maximum=Max("source_row"))["maximum"] or 0) + 1
+    raw_data = {
+        "scanner_session_id": session.pk,
+        "scanner_code_mode": "TWO_CODES",
+        "main_code": pending.resolved_code,
+        "long_code": long_code,
+        "main_scanned_at": pending.scanned_at.isoformat(),
+        "long_scanned_at": scanned_at.isoformat(),
+        "advised_quantity": advised,
+        "unadvised": advised == 0,
+    }
+    if manifest_line:
+        section = str((manifest_line.raw_data or {}).get("_manifest_section", "") or "").strip()
+        if section:
+            raw_data["_manifest_section"] = section
+    line = NormalizedLine.objects.create(
+        batch=session.batch,
+        source_sheet="Scanner",
+        source_row=next_source_row,
+        code=pending.resolved_code,
+        long_code=long_code,
+        description=manifest_line.description if manifest_line else "",
+        quantity=1,
+        location=pending.pallet,
+        container_identifier=session.container.identifier,
+        raw_data=raw_data,
+    )
+    session.batch.total_rows += 1
+    session.batch.total_units += 1
+    session.batch.save(update_fields=["total_rows", "total_units"])
+    result = "WARNING" if warnings else "SUCCESS"
+    message = f"{pending.resolved_code} + {long_code} registered on {pending.pallet}."
+    if warnings:
+        message += " Review: " + "; ".join(warnings) + "."
+    event = FirstScanEvent.objects.create(
+        session=session,
+        normalized_line=line,
+        event_type="BIKE",
+        input_type="LONG_CODE",
+        result=result,
+        scanned_value=long_code,
+        resolved_code=pending.resolved_code,
+        long_code=long_code,
+        pallet=pending.pallet,
+        message=message,
+        scanned_at=scanned_at,
+    )
+    pending.message = "Main Code paired with Long Code."
+    pending.save(update_fields=["message"])
+    return True, "warning" if warnings else "success", message, event
+
+
+def _process_two_code_value(session, value):
+    pending = _pending_two_code_event(session)
+    if pending:
+        if not is_pon_long_code(value):
+            event = _first_scan_error_event(
+                session,
+                value,
+                f"Waiting for Long Code for {pending.resolved_code}. No bike was completed.",
+                "LONG_CODE",
+            )
+            return False, "error", event.message, event
+        return _complete_two_code_bike(session, pending, value)
+
+    if not session.current_pallet:
+        event = _first_scan_error_event(
+            session,
+            value,
+            "Scan a pallet before scanning bikes. No bike was registered.",
+            "CODE",
+        )
+        return False, "error", event.message, event
+    if not PRODUCT_CODE_PATTERN.fullmatch(value) or is_pon_long_code(value):
+        event = _first_scan_error_event(
+            session,
+            value,
+            "Barcode is not a compatible Main Code. No bike was registered.",
+            "CODE",
+        )
+        return False, "error", event.message, event
+    event = FirstScanEvent.objects.create(
+        session=session,
+        event_type="BIKE",
+        input_type="CODE",
+        result="WARNING",
+        scanned_value=value,
+        resolved_code=value,
+        pallet=session.current_pallet,
+        message=f"Waiting for Long Code for {value}.",
+    )
+    return True, "warning", event.message, event
+
+
 def _process_first_scan_value(session, scanned_value):
     value = _normalise_scanned_value(scanned_value)
     if not value:
@@ -1246,6 +1542,7 @@ def _process_first_scan_value(session, scanned_value):
         return False, "error", "The scan session is paused or finished.", None
 
     if LOCATION_PATTERN.fullmatch(value):
+        pending = _pending_two_code_event(session) if _first_scan_two_codes(session.container) else None
         session.current_pallet = value
         session.save(update_fields=["current_pallet", "updated_at"])
         event = FirstScanEvent.objects.create(
@@ -1255,9 +1552,15 @@ def _process_first_scan_value(session, scanned_value):
             result="SUCCESS",
             scanned_value=value,
             pallet=value,
-            message=f"Current pallet changed to {value}.",
+            message=(
+                f"Current pallet changed to {value}; pending Main Code {pending.resolved_code} remains on {pending.pallet}."
+                if pending else f"Current pallet changed to {value}."
+            ),
         )
         return True, "success", event.message, event
+
+    if _first_scan_two_codes(session.container):
+        return _process_two_code_value(session, value)
 
     product, input_type = _resolve_first_scan_product(session, value)
     if not product:
@@ -1371,6 +1674,18 @@ def first_scan_scanner(request, pk):
             if mode not in dict(FirstScanSession.MODE_CHOICES):
                 messages.error(request, "Select Auto, Code or Long Code.")
                 return redirect("receiving:first_scan_scanner", pk=container.pk)
+            requested_code_mode = str(request.POST.get("code_mode", "ONE_CODE") or "ONE_CODE").upper()
+            if requested_code_mode not in dict(Container.FIRST_SCAN_CODE_MODE_CHOICES):
+                messages.error(request, "Select 1 CODE or 2 CODES for this container.")
+                return redirect("receiving:first_scan_scanner", pk=container.pk)
+            if not container.first_scan_code_mode:
+                container.first_scan_code_mode = requested_code_mode
+                container.save(update_fields=["first_scan_code_mode"])
+            elif requested_code_mode != container.first_scan_code_mode:
+                messages.warning(
+                    request,
+                    f"This container remains fixed at {container.get_first_scan_code_mode_display()}.",
+                )
             if session:
                 messages.warning(request, "The existing First Scan session was reopened; no new session was created.")
             else:
@@ -1380,6 +1695,10 @@ def first_scan_scanner(request, pk):
                     mode=mode,
                     created_by=request.user,
                 )
+                mapping = dict(session.batch.mapping or {})
+                mapping["scanner_code_mode"] = container.first_scan_code_mode
+                session.batch.mapping = mapping
+                session.batch.save(update_fields=["mapping"])
                 messages.success(request, "First Scan started. Scan a pallet, then scan bikes continuously.")
             return redirect("receiving:first_scan_scanner", pk=container.pk)
 
@@ -1411,6 +1730,17 @@ def first_scan_scanner(request, pk):
                 return _first_scan_result(request, container, session, True, "success", "First Scan resumed.")
             return _first_scan_result(request, container, session, False, "warning", "First Scan is already active.")
         if action == "finish":
+            pending = _pending_two_code_event(session) if _first_scan_two_codes(container) else None
+            if pending:
+                return _first_scan_result(
+                    request,
+                    container,
+                    session,
+                    False,
+                    "error",
+                    f"Scan the Long Code for {pending.resolved_code} before finishing First Scan.",
+                    400,
+                )
             now = timezone.now()
             pause = session.pauses.filter(resumed_at__isnull=True).order_by("-started_at").first()
             if pause:
@@ -1428,7 +1758,7 @@ def first_scan_scanner(request, pk):
             if photo.size > settings.MAX_UPLOAD_SIZE:
                 return _first_scan_result(request, container, session, False, "error", "The photo exceeds the upload size limit.", 400)
             event = session.events.filter(
-                event_type="BIKE", result="SUCCESS", pallet=session.current_pallet
+                event_type="BIKE", normalized_line__isnull=False, pallet=session.current_pallet
             ).first()
             FirstScanPhoto.objects.create(
                 session=session,
@@ -1448,7 +1778,7 @@ def first_scan_scanner(request, pk):
         source_file__kind="RECEIVED",
         status="CONFIRMED",
     ).first()
-    expected_total = client_batch.total_units if client_batch else None
+    expected_total = _first_scan_expected_total(container, client_batch)
     current_total = received_batch.total_units if received_batch else 0
     completion = min(100, round((current_total / expected_total) * 100)) if expected_total else 0
     return render(
@@ -1462,6 +1792,7 @@ def first_scan_scanner(request, pk):
             "current_total": current_total,
             "completion": completion,
             "mode_choices": FirstScanSession.MODE_CHOICES,
+            "code_mode_choices": Container.FIRST_SCAN_CODE_MODE_CHOICES,
         },
     )
 
@@ -1658,12 +1989,27 @@ def sync_product_moves(request, pk):
         return _workflow_redirect(request, pk, "receiving:stage2", "translogic")
     try:
         content = source_path.read_bytes()
+        direct_source = bool(_direct_product_moves_path())
+        active_manual = ProductMovesImport.objects.filter(container=container, active=True).first()
+        if _product_moves_local_refresh_is_stale(
+            active_manual,
+            source_path,
+            content,
+            direct_source=direct_source,
+        ):
+            messages.warning(
+                request,
+                "A newer manual PRODUCT_MOVES upload is active. "
+                "The local working-copy fallback is older and was NOT allowed to replace it. "
+                f"Active snapshot remains {active_manual.row_count} row(s), SHA-256 {active_manual.sha256[:12]}....",
+            )
+            return _workflow_redirect(request, pk, "receiving:stage2", "translogic")
         record = _activate_product_moves(
             container,
             request.user,
             content,
             original_name=source_path.name,
-            source_path=(settings.PON_PRODUCT_MOVES_SOURCE_DISPLAY if _direct_product_moves_path() else str(source_path)),
+            source_path=(settings.PON_PRODUCT_MOVES_SOURCE_DISPLAY if direct_source else str(source_path)),
         )
     except (OSError, ValueError) as exc:
         messages.error(request, f"PRODUCT_MOVES.CSV could not be imported: {exc}")
@@ -1738,7 +2084,7 @@ def transfer_upstockserial(request, pk):
             return redirect("receiving:transfer_upstockserial", pk=pk)
         messages.success(
             request,
-            f"UPStockSerial.csv copied and verified at {audit['timestamp']} → {status['destination_display']}.",
+            f"UPStockSerial.csv copied and verified at {audit['timestamp']} â†’ {status['destination_display']}.",
         )
         return redirect(reverse("receiving:container_detail", args=[pk]) + "#translogic")
 
@@ -1834,6 +2180,64 @@ def _download_generated_export(export, content_type, download_name=None):
     return response
 
 
+
+# PON_UPSTOCK_CACHE_PADDING_1008.0929
+def _upstock_export_has_10_char_movements(export):
+    """Only reuse a cached UPStockSerial export when every operational Movement is 10 raw characters."""
+    export_file = getattr(export, "file", None) if export else None
+    expected_rows = int(getattr(export, "row_count", 0) or 0)
+    if export_file is None or expected_rows < 1:
+        return False
+
+    try:
+        export_file.open("rb")
+        try:
+            raw = export_file.read()
+        finally:
+            export_file.close()
+        lines = raw.decode("utf-8-sig").splitlines()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+
+    if not lines:
+        return False
+
+    seen = 0
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        movement = line.split(",", 1)[0]
+        if len(movement) != 10 or not movement.strip():
+            return False
+        seen += 1
+        if seen >= expected_rows:
+            break
+
+    return seen == expected_rows
+
+# PON_UPSTOCK_INVALIDATE_OLD_PADDING_1008.1326
+def _upstock_export_has_legacy_blank_padding(export):
+    """Detect only legacy UPStockSerial exports that still contain trailing blank CSV rows."""
+    export_file = getattr(export, "file", None) if export else None
+    if not export_file:
+        return False
+    try:
+        export_file.open("rb")
+        try:
+            raw = export_file.read()
+        finally:
+            export_file.close()
+    except (OSError, ValueError):
+        return False
+
+    if isinstance(raw, str):
+        text = raw
+    else:
+        text = bytes(raw or b"").decode("utf-8", errors="replace")
+
+    return any(line.strip() == ",," for line in text.splitlines()[1:])
+
+
 def _ensure_current_upstockserial(container, user):
     received_batch, moves_import, reconciliation = _stage2_data(container)
     latest = container.generated_exports.filter(kind="UPSTOCK_SERIAL").first()
@@ -1853,7 +2257,7 @@ def _ensure_current_upstockserial(container, user):
         raise ValueError("Load PRODUCT_MOVES.CSV before downloading UPStockSerial.csv.")
     if not reconciliation or not reconciliation.get("ready"):
         raise ValueError("Stage 2 reconciliation has exceptions. Resolve them before downloading UPStockSerial.csv.")
-    if latest and not stale:
+    if latest and not stale and "CLIENT_REPORT_R1008.1032" in str(getattr(latest, "original_name", "") or "") and not _upstock_export_has_legacy_blank_padding(latest):
         return latest
 
     content = build_upstockserial_csv(reconciliation["rows"])
@@ -1905,7 +2309,7 @@ def _ensure_current_client_report(container, user):
         raise ValueError("Synchronize the Translogic product master before downloading the customer report.")
     if not rows:
         raise ValueError("There are no product rows available for the customer report.")
-    if latest and not stale:
+    if latest and not stale and "CLIENT_REPORT_R1008.1032" in str(getattr(latest, "original_name", "") or ""):
         return latest
 
     content = build_client_receiving_workbook(container.identifier, rows).getvalue()
@@ -2068,7 +2472,7 @@ def configure_import(request, source_id):
                     source_file=source,
                     mapping=suggested,
                     total_rows=len(rows),
-                    total_units=sum(item["quantity"] for item in rows),
+                    total_units=_batch_total_units(source.kind, rows),
                     created_by=request.user,
                 )
                 NormalizedLine.objects.bulk_create([NormalizedLine(batch=batch, **item) for item in rows])
@@ -2080,9 +2484,14 @@ def configure_import(request, source_id):
     form = ImportMappingForm(request.POST or None, sheets=sheet_names, initial=suggested)
     selected_sheet_name = form["sheet_name"].value() or suggested.get("sheet_name") or (sheet_names[0] if sheet_names else "")
     selected_sheet = next((item for item in sheets if item["name"] == selected_sheet_name), sheets[0] if sheets else None)
-    preview_headers = []
-    if selected_sheet:
-        preview_headers = [get_column_letter(index) for index in range(1, min(selected_sheet["columns"], 12) + 1)]
+    selected_analysis = analysis
+    if selected_sheet_name and selected_sheet_name != analysis.get("worksheet"):
+        selected_analysis = analyse_workbook_mapping(
+            source.file.path,
+            source.kind,
+            known_product_codes=_known_product_codes_for_customer(source.container.customer),
+            sheet_name=selected_sheet_name,
+        )
     mapping_summary = {
         "code": (form["code_column"].value() or "").upper(),
         "long_code": (form["long_code_column"].value() or "").upper(),
@@ -2090,23 +2499,73 @@ def configure_import(request, source_id):
         "quantity": (form["quantity_column"].value() or "").upper(),
         "container": (form["container_column"].value() or "").upper(),
     }
-    mapping_ready = bool(selected_sheet and mapping_summary["code"] and form["start_row"].value())
+    mapping_ready = bool(
+        selected_sheet
+        and (mapping_summary["code"] or mapping_summary["long_code"])
+        and form["start_row"].value()
+    )
+    preview_mapping = {
+        field: form[field].value() or ""
+        for field in ("code_column", "long_code_column", "description_column", "quantity_column", "container_column")
+    }
+    preview_mapping["location_stream"] = bool(form["location_stream"].value())
+    preview_mapping["_header_row"] = selected_analysis.get("header_row", 0)
+    try:
+        source_preview = build_source_file_preview(
+            source.file.path,
+            selected_sheet_name,
+            form["start_row"].value() or suggested.get("start_row") or 1,
+            form["start_column"].value() or suggested.get("start_column") or "A",
+            preview_mapping,
+        ) if selected_sheet else None
+    except (TypeError, ValueError):
+        source_preview = None
+
+    workbook_summary = {
+        "data_rows": analysis.get("data_rows", 0),
+        "bike_units": analysis.get("bike_units", 0),
+        "spare_units": analysis.get("spare_units", 0),
+    }
+    preview_count_mapping = {
+        "sheet_name": selected_sheet_name,
+        "start_row": form["start_row"].value() or suggested.get("start_row") or 1,
+        "row_step": form["row_step"].value() or suggested.get("row_step") or 1,
+        "code_column": form["code_column"].value() or "",
+        "long_code_column": form["long_code_column"].value() or "",
+        "description_column": form["description_column"].value() or "",
+        "quantity_column": form["quantity_column"].value() or "",
+        "container_column": form["container_column"].value() or "",
+        "coloured_rows_only": bool(form["coloured_rows_only"].value()),
+        "required_fill_signature": form["required_fill_signature"].value() or "",
+        "location_stream": bool(form["location_stream"].value()),
+    }
+    if selected_sheet and (preview_count_mapping["code_column"] or preview_count_mapping["long_code_column"]):
+        try:
+            count_rows, _ = parse_workbook(source.file.path, preview_count_mapping)
+            parsed_summary = summarize_import_rows(count_rows)
+            workbook_summary = {
+                "data_rows": parsed_summary["data_rows"],
+                "bike_units": parsed_summary["bike_units"],
+                "spare_units": parsed_summary["spare_units"],
+            }
+        except (OSError, TypeError, ValueError):
+            pass
 
     if request.method == "POST" and form.is_valid():
         mapping = form.cleaned_data.copy()
         save_profile = mapping.pop("save_profile", False)
         profile_name = mapping.pop("profile_name", "")
-        selected_analysis = analysis
+        submitted_analysis = analysis
         if mapping.get("sheet_name") and mapping.get("sheet_name") != analysis.get("worksheet"):
-            selected_analysis = analyse_workbook_mapping(
+            submitted_analysis = analyse_workbook_mapping(
                 source.file.path,
                 source.kind,
                 known_product_codes=_known_product_codes_for_customer(source.container.customer),
                 sheet_name=mapping["sheet_name"],
             )
-        mapping["_structure_signature"] = selected_analysis["structure_signature"]
-        mapping["_mapping_confidence"] = selected_analysis["confidence"]
-        mapping["_header_row"] = selected_analysis["header_row"]
+        mapping["_structure_signature"] = submitted_analysis["structure_signature"]
+        mapping["_mapping_confidence"] = submitted_analysis["confidence"]
+        mapping["_header_row"] = submitted_analysis["header_row"]
         mapping["_analysis_version"] = "2026.09"
         try:
             rows, errors = parse_workbook(source.file.path, mapping)
@@ -2122,7 +2581,7 @@ def configure_import(request, source_id):
                         source_file=source,
                         mapping=mapping,
                         total_rows=len(rows),
-                        total_units=sum(item["quantity"] for item in rows),
+                        total_units=_batch_total_units(source.kind, rows),
                         created_by=request.user,
                     )
                     NormalizedLine.objects.bulk_create([NormalizedLine(batch=batch, **item) for item in rows])
@@ -2157,13 +2616,76 @@ def configure_import(request, source_id):
             "form": form,
             "sheets": sheets,
             "selected_sheet": selected_sheet,
-            "preview_headers": preview_headers,
+            "source_preview": source_preview,
             "mapping_summary": mapping_summary,
             "mapping_ready": mapping_ready,
             "mapping_analysis": analysis,
+            "workbook_summary": workbook_summary,
             "detected_containers": detected,
         },
     )
+
+
+@login_required
+def source_file_preview(request, source_id):
+    """Return a live, read-only workbook window for the mapping screen."""
+    if request.method != "GET":
+        raise Http404
+    source = get_object_or_404(SourceFile.objects.select_related("container__customer"), pk=source_id)
+    try:
+        sheet_name = request.GET.get("sheet_name") or ""
+        analysis = _source_mapping_analysis(source) if not sheet_name else analyse_workbook_mapping(
+            source.file.path, source.kind,
+            known_product_codes=_known_product_codes_for_customer(source.container.customer),
+            sheet_name=sheet_name,
+        )
+        sheet_name = analysis["worksheet"]
+        detected = dict(analysis["mapping"])
+        start_row = request.GET.get("start_row") or detected.get("start_row") or 1
+        start_column = request.GET.get("start_column") or detected.get("start_column") or "A"
+        refresh_detection = request.GET.get("refresh_detection") in {"1", "true", "on"}
+        mapping = {
+            field: str(detected.get(field) or "").strip().upper() if refresh_detection
+            else (request.GET.get(field) or "").strip().upper()
+            for field in ("code_column", "long_code_column", "description_column", "quantity_column", "container_column")
+        }
+        mapping["location_stream"] = bool(detected.get("location_stream")) if refresh_detection else request.GET.get("location_stream") in {"1", "true", "on"}
+        mapping["_header_row"] = analysis["header_row"]
+        preview = build_source_file_preview(
+            source.file.path,
+            sheet_name,
+            start_row,
+            start_column,
+            mapping,
+        )
+        count_mapping = {
+            **mapping,
+            "sheet_name": sheet_name,
+            "start_row": int(start_row),
+            "row_step": int(request.GET.get("row_step") or detected.get("row_step") or 1),
+            "coloured_rows_only": request.GET.get("coloured_rows_only") in {"1", "true", "on"},
+            "required_fill_signature": request.GET.get("required_fill_signature") or "",
+        }
+        if refresh_detection:
+            count_mapping["coloured_rows_only"] = bool(detected.get("coloured_rows_only"))
+            count_mapping["required_fill_signature"] = detected.get("required_fill_signature") or ""
+        count_rows, _ = parse_workbook(source.file.path, count_mapping)
+        summary = summarize_import_rows(count_rows)
+    except (OSError, TypeError, ValueError) as exc:
+        return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+    return JsonResponse({
+        "ok": True,
+        "preview": preview,
+        "summary": {
+            "data_rows": summary["data_rows"],
+            "bike_units": summary["bike_units"],
+            "spare_units": summary["spare_units"],
+        },
+        "detected_mapping": {
+            field: detected.get(field, "")
+            for field in ("code_column", "long_code_column", "description_column", "quantity_column", "container_column")
+        },
+    })
 
 
 @login_required
@@ -2174,11 +2696,15 @@ def batch_preview(request, batch_id):
     multi_container = len(groups) > 1
     current_group = next((item for item in groups if item["identifier"] == current_identifier), None)
     current_present = not groups or bool(current_group)
+    batch_summary = summarize_import_rows(batch.lines.all())
     return render(
         request,
         "receiving/batch_preview.html",
         {
             "batch": batch,
+            "batch_summary": batch_summary,
+            "spare_parts_units": batch_summary["spare_units"],
+            "bike_units": batch_summary["bike_units"],
             "lines": batch.lines.all()[:200],
             "container_groups": groups,
             "multi_container": multi_container,
@@ -2256,7 +2782,7 @@ def comparison(request, pk):
     ).select_related("source_file").first()
     client_lines = client_batch.lines.all() if client_batch else []
     received_lines = received_batch.lines.all() if received_batch else []
-    comparison_rows = compare_lines(client_lines, received_lines)
+    comparison_rows = compare_lines(client_lines, received_lines, two_codes=_first_scan_two_codes(container))
     _, _, client_report_catalog, client_report_rows = _client_report_data(container)
     totals = {
         "expected": sum(row["expected"] for row in comparison_rows),
@@ -2325,6 +2851,31 @@ def _enrich_pbp_to_pon_rows_from_catalog_file(catalog, rows):
         row["pbp_to_pon_data"] = pbp_to_pon_product_data(row)
 
 
+def _persisted_import_classification(state, saved):
+    """Return the original container decision before any cached current comparison."""
+    return (state.import_classification if state else "") or saved.get("classification", "")
+
+
+def _replication_start_for_product_forms(product_forms):
+    """Return the first Truly New form; historical PBP rows stay outside replication."""
+    return sum(
+        1 for item in product_forms if item["row"].get("is_pbp_to_pon")
+    )
+
+
+def _historical_import_selection(rows):
+    """Select and order imports only from the original container classification."""
+    new_rows_by_code = {
+        row["code"]: row for row in rows
+        if row.get("is_new") and not row.get("is_pbp_to_pon")
+    }
+    migration_rows_by_code = {
+        row["code"]: row for row in rows if row.get("is_pbp_to_pon")
+    }
+    import_codes = sorted(migration_rows_by_code) + list(new_rows_by_code)
+    return new_rows_by_code, migration_rows_by_code, import_codes
+
+
 def _persisted_product_check_data(container, received_batch=None):
     """Read stored decisions only. No master parsing, classification or writes."""
     catalog = _active_catalog_for_customer(container.customer)
@@ -2346,7 +2897,7 @@ def _persisted_product_check_data(container, received_batch=None):
         state = states.get(row["code"])
         history = state.import_history if state else {}
         saved = history.get("_check_row", {})
-        classification = saved.get("classification") or (state.import_classification if state else "")
+        classification = _persisted_import_classification(state, saved)
         if state and not classification and state.was_new:
             classification = "NEW"
         rows.append({
@@ -2354,7 +2905,7 @@ def _persisted_product_check_data(container, received_batch=None):
             "classification": classification,
             "is_new": classification == "NEW",
             "is_pbp_to_pon": classification == "PBP_TO_PON",
-            "status": "PBP → PON" if classification == "PBP_TO_PON" else ("New" if classification == "NEW" else ("Existing" if classification else "Needs Product Check")),
+            "status": "PBP â†’ PON" if classification == "PBP_TO_PON" else ("New" if classification == "NEW" else ("Existing" if classification else "Needs Product Check")),
             "tl_code": saved.get("tl_code", ""), "matched_by": saved.get("matched_by", ""),
             "pbp_to_pon_data": saved.get("pbp_to_pon_data", history),
             "definition": definitions.get(row["code"]),
@@ -2467,6 +3018,104 @@ def _prefer_current_pon_data(catalog, migration_rows_by_code):
         row["pbp_to_pon_data"] = pon_data
 
 
+
+def _normalise_manifest_family_text(value):
+    return re.sub(r"[^A-Z0-9]+", " ", str(value or "").upper()).strip()
+
+
+def _manifest_header_group1_rule(client_batch, group1_rules):
+    """Return one active Group1 family explicitly named by the Manifest header.
+
+    Example: ``Santa Cruz - Article Number`` resolves the existing ``Santa Cruz``
+    family rule even when individual bike descriptions are abbreviated and do not
+    contain the brand/family name. Ambiguous or unreadable headers deliberately
+    fall back to the existing conservative description-based resolver.
+    """
+    if not client_batch:
+        return None
+    source_file = getattr(client_batch, "source_file", None)
+    if not source_file or not getattr(source_file, "file", None):
+        return None
+
+    mapping = dict(client_batch.mapping or {})
+    sheet_name = str(mapping.get("sheet_name") or "").strip()
+    if not sheet_name:
+        first_line = client_batch.lines.order_by("source_row", "pk").first()
+        sheet_name = str(getattr(first_line, "source_sheet", "") or "").strip()
+    if not sheet_name:
+        return None
+
+    # Scan only the opening workbook region and require the explicit customer
+    # article-number header pattern. This is independent of the configured first
+    # data row and does not infer a family from individual product descriptions.
+    try:
+        preview = build_source_file_preview(
+            source_file.file.path,
+            sheet_name,
+            1,
+            "A",
+            mapping,
+            row_limit=30,
+            column_limit=40,
+        )
+    except Exception:
+        # Family context is an optional aid. A damaged/unavailable source must not
+        # bypass the existing conservative Group1 resolver or break Product Check.
+        return None
+
+    header_cells = [
+        _normalise_manifest_family_text(value)
+        for row in preview.get("rows", [])
+        for value in row.get("values", [])
+        if _normalise_manifest_family_text(value)
+    ]
+    if not header_cells:
+        return None
+
+    matches = []
+    for rule in group1_rules:
+        if not getattr(rule, "active", True):
+            continue
+        family_text = _normalise_manifest_family_text(getattr(rule, "family_name", ""))
+        suffix = str(getattr(rule, "suffix", "") or "").strip().upper()
+        if not family_text or not suffix:
+            continue
+        family_marker = f" {family_text} "
+        for cell_text in header_cells:
+            padded_cell = f" {cell_text} "
+            if family_marker in padded_cell and " ARTICLE NUMBER " in padded_cell:
+                matches.append((len(family_text), family_text, rule))
+                break
+
+    if not matches:
+        return None
+
+    longest = max(item[0] for item in matches)
+    top = [item for item in matches if item[0] == longest]
+    distinct_rules = {item[2].pk for item in top}
+    if len(distinct_rules) != 1:
+        return None
+    return top[0][2]
+
+
+def _group1_resolution_from_manifest_rule(rule, customer):
+    if not rule:
+        return None
+    customer_prefix = re.sub(r"[^A-Z0-9]+", "", str(customer or "").upper())
+    suffix = str(getattr(rule, "suffix", "") or "").strip().upper()
+    if not customer_prefix or not suffix:
+        return None
+    return {
+        "resolved": True,
+        "reason": "manifest_header",
+        "id": rule.pk,
+        "family_name": str(getattr(rule, "family_name", "") or "").strip(),
+        "suffix": suffix,
+        "matched_phrase": str(getattr(rule, "family_name", "") or "").strip(),
+        "group1": f"{customer_prefix}{suffix}",
+    }
+
+
 def _product_check_data(container):
     catalog = _active_catalog_for_customer(container.customer)
     received_batch = ImportBatch.objects.filter(
@@ -2496,16 +3145,38 @@ def _product_check_data(container):
         client_values = {}
         if client_batch:
             for line in client_batch.lines.all():
-                item = client_values.setdefault(line.code.strip().upper(), {"description": "", "long_code": ""})
-                if line.description and not item["description"]:
-                    item["description"] = line.description.strip()
-                if line.long_code and not item["long_code"]:
-                    item["long_code"] = line.long_code.strip().upper()
+                line_code = str(line.code or "").strip().upper()
+                line_long_code = str(line.long_code or "").strip().upper()
+                source_context = {
+                    "description": str(line.description or "").strip(),
+                    "long_code": line_long_code,
+                    "manifest_section": manifest_section(line),
+                    "source_row": line.source_row,
+                }
+                # Santa Cruz manifests can contain only Long Code while the physical
+                # First Scan discovers the Bike Code later. Index both identifiers so
+                # Product Check can reconnect the physical bike to its manifest row.
+                for key in {line_code, line_long_code} - {""}:
+                    item = client_values.setdefault(
+                        key,
+                        {"description": "", "long_code": "", "manifest_section": "", "source_row": None},
+                    )
+                    if source_context["description"] and not item["description"]:
+                        item["description"] = source_context["description"]
+                    if source_context["long_code"] and not item["long_code"]:
+                        item["long_code"] = source_context["long_code"]
+                    if source_context["manifest_section"] and not item["manifest_section"]:
+                        item["manifest_section"] = source_context["manifest_section"]
+                    if item["source_row"] is None:
+                        item["source_row"] = source_context["source_row"]
         definitions = {item.code: item for item in ProductDefinition.objects.filter(code__in={r["code"] for r in rows})}
         for row in rows:
-            source = client_values.get(row["code"], {})
+            row_long_code = str(row.get("long_code") or "").strip().upper()
+            source = client_values.get(row_long_code) or client_values.get(row["code"], {})
             row["description"] = source.get("description", "")
-            row["long_code"] = row["long_code"] or source.get("long_code", "")
+            row["long_code"] = row_long_code or source.get("long_code", "")
+            row["manifest_section"] = source.get("manifest_section", "")
+            row["manifest_source_row"] = source.get("source_row")
             row["definition"] = definitions.get(row["code"])
     if rows:
         states = {item.code: item for item in container.product_statuses.all()}
@@ -2541,6 +3212,11 @@ def product_check(request, pk):
         if closed_redirect:
             return closed_redirect
     catalog, received_batch, rows, summary = _product_check_data(container)
+    rows = _original_import_rows(container, rows, recover=False)
+    migration_rows_by_code = {
+        row["code"]: row for row in rows if row.get("is_pbp_to_pon")
+    }
+    _prefer_current_pon_data(catalog, migration_rows_by_code)
     unique_new_rows = []
     seen = set()
     for row in rows:
@@ -2551,10 +3227,44 @@ def product_check(request, pk):
             unique_new_rows.append(row)
             seen.add(row["code"])
 
+    printable_product_rows = _group_product_rows_by_code(rows)
+    printable_order = {
+        str(item.get("code") or "").strip().upper(): index
+        for index, item in enumerate(printable_product_rows)
+    }
+    non_new_rows = [row for row in unique_new_rows if row.get("is_pbp_to_pon")]
+    non_new_rows.sort(key=lambda row: str(row.get("code") or "").strip().upper())
+    truly_new_rows = [
+        row for row in unique_new_rows
+        if row.get("is_new") and not row.get("is_pbp_to_pon")
+    ]
+    truly_new_rows.sort(
+        key=lambda row: printable_order.get(
+            str(row.get("code") or "").strip().upper(),
+            len(printable_order),
+        )
+    )
+    unique_new_rows = non_new_rows + truly_new_rows
+    # PON_PBP_GREEN_NEW_BLOCK_1008_1500
+    # PON_PRODUCT_CHECK_SCREEN_PRINT_ORDER_1008_1515: genuine NEW rows follow the exact printed PON Product Check order.
+    # PON_PBP_PERSISTED_VISUAL_ORDER_1009_0815
+    # PON_PBP_GREEN_NEW_BLOCK_1008_1500
+    # PON_PRODUCT_CHECK_SCREEN_PRINT_ORDER_1008_1515: genuine NEW rows follow the exact printed PON Product Check order.
+
     name_dictionary = catalog.effective_name_dictionary() if catalog else {}
     export_configuration = _export_configuration()
     group1_rules = list(Group1Family.objects.filter(active=True).order_by("-priority", "family_name"))
     group1_rules_by_id = {rule.pk: rule for rule in group1_rules}
+    client_batch = ImportBatch.objects.filter(
+        source_file__container=container,
+        source_file__kind="CLIENT",
+        status="CONFIRMED",
+    ).select_related("source_file").first()
+    manifest_group1_rule = _manifest_header_group1_rule(client_batch, group1_rules)
+    manifest_group1_resolution = _group1_resolution_from_manifest_rule(
+        manifest_group1_rule,
+        export_configuration["TL_CUSTOMER"],
+    )
     product_forms = []
     all_valid = True
     unresolved_group1_count = 0
@@ -2586,6 +3296,7 @@ def product_check(request, pk):
             prefix=f"product-{index}",
             instance=definition,
             initial=initial,
+            lock_source_fields=True,
         )
         form_valid = True
         if request.method == "POST":
@@ -2600,8 +3311,15 @@ def product_check(request, pk):
         else:
             candidate_long_name = initial.get("full_name", "")
 
-        group1_resolution = resolve_group1_family(
-            candidate_long_name,
+        group1_match_text = " ".join(
+            value for value in (
+                candidate_long_name,
+                row.get("manifest_section", ""),
+            )
+            if str(value or "").strip()
+        )
+        group1_resolution = manifest_group1_resolution or resolve_group1_family(
+            group1_match_text,
             export_configuration["TL_CUSTOMER"],
             group1_rules,
         )
@@ -2624,6 +3342,8 @@ def product_check(request, pk):
                 "group1_resolution": group1_resolution,
             }
         )
+
+    replication_start_index = _replication_start_for_product_forms(product_forms)
 
     if request.method == "POST":
         if not unique_new_rows:
@@ -2665,6 +3385,7 @@ def product_check(request, pk):
             "missing_definitions": missing_definitions,
             "saved_definition_count": saved_definition_count,
             "pending_definition_count": pending_definition_count,
+            "replication_start_index": replication_start_index,
             "unresolved_group1_count": unresolved_group1_count,
             "export_configuration": export_configuration,
             "generated_exports": container.generated_exports.all()[:20],
@@ -2678,6 +3399,11 @@ def product_check(request, pk):
 def export_product_check(request, pk):
     container = get_object_or_404(Container, pk=pk)
     catalog, received_batch, rows, summary = _product_check_data(container)
+    rows = _original_import_rows(container, rows, recover=False)
+    migration_rows_by_code = {
+        row["code"]: row for row in rows if row.get("is_pbp_to_pon")
+    }
+    _prefer_current_pon_data(catalog, migration_rows_by_code)
     if not catalog or not received_batch:
         messages.error(request, "Synchronize the product catalogue and confirm the received-bike file before exporting.")
         return redirect("receiving:product_check", pk=pk)
@@ -2709,10 +3435,8 @@ def export_new_products(request, pk):
         return redirect("receiving:product_check", pk=pk)
 
     rows = _original_import_rows(container, rows)
-    new_rows_by_code = {row["code"]: row for row in rows if row["is_new"]}
-    migration_rows_by_code = {row["code"]: row for row in rows if row.get("is_pbp_to_pon")}
+    new_rows_by_code, migration_rows_by_code, import_codes = _historical_import_selection(rows)
     _prefer_current_pon_data(catalog, migration_rows_by_code)
-    import_codes = sorted(set(new_rows_by_code) | set(migration_rows_by_code))
     definition_required_codes = sorted(
         set(new_rows_by_code)
         | {
@@ -2729,20 +3453,35 @@ def export_new_products(request, pk):
         messages.error(request, f"Complete names, Group1, dimensions and weight for: {', '.join(missing)}.")
         return redirect("receiving:product_check", pk=pk)
     if not import_codes:
-        messages.warning(request, "There are no New or PBP → PON products to import into Translogic.")
+        messages.warning(request, "There are no New or PBP â†’ PON products to import into Translogic.")
         return redirect("receiving:product_check", pk=pk)
 
     configuration = _export_configuration()
     group1_rules = list(Group1Family.objects.filter(active=True).order_by("-priority", "family_name"))
     rules_by_id = {rule.pk: rule for rule in group1_rules}
+    client_batch = ImportBatch.objects.filter(
+        source_file__container=container,
+        source_file__kind="CLIENT",
+        status="CONFIRMED",
+    ).select_related("source_file").first()
+    manifest_group1_rule = _manifest_header_group1_rule(client_batch, group1_rules)
+    manifest_group1_resolution = _group1_resolution_from_manifest_rule(
+        manifest_group1_rule,
+        configuration["TL_CUSTOMER"],
+    )
     unresolved = []
     changed = []
     export_items = []
+    pbp_export_codes = set()
 
     for code in import_codes:
         if code in new_rows_by_code:
             definition = definitions[code]
-            resolution = resolve_group1_family(definition.full_name, configuration["TL_CUSTOMER"], group1_rules)
+            resolution = manifest_group1_resolution or resolve_group1_family(
+                definition.full_name,
+                configuration["TL_CUSTOMER"],
+                group1_rules,
+            )
             if not resolution.get("resolved"):
                 unresolved.append(code)
                 continue
@@ -2760,7 +3499,11 @@ def export_new_products(request, pk):
         fallback = definitions.get(code)
         full_name = history.get("long_name") or getattr(fallback, "full_name", "")
         short_name = history.get("short_name") or getattr(fallback, "short_name", "")
-        resolution = resolve_group1_family(full_name, "PON", group1_rules)
+        resolution = manifest_group1_resolution or resolve_group1_family(
+            full_name,
+            "PON",
+            group1_rules,
+        )
         if not resolution.get("resolved"):
             unresolved.append(code)
             continue
@@ -2778,8 +3521,10 @@ def export_new_products(request, pk):
             weight_kg = fallback.weight_kg
             cubic_override = None
 
+        export_code = history.get("code") or code
+        pbp_export_codes.add(str(export_code).strip().upper())
         export_items.append(SimpleNamespace(
-            code=history.get("code") or code,
+            code=export_code,
             long_code=history.get("pon_sku") or history.get("code2") or getattr(fallback, "long_code", "") or row.get("long_code", ""),
             short_name=short_name,
             full_name=full_name,
@@ -2803,7 +3548,7 @@ def export_new_products(request, pk):
     if unresolved:
         messages.error(
             request,
-            "Group1 could not be resolved for: " + ", ".join(unresolved) + ". Add or adjust the relation in Administration → Group1 family mappings, then review the products again.",
+            "Group1 could not be resolved for: " + ", ".join(unresolved) + ". Add or adjust the relation in Administration â†’ Group1 family mappings, then review the products again.",
         )
         return redirect("receiving:product_check", pk=pk)
     if changed:
@@ -2812,7 +3557,12 @@ def export_new_products(request, pk):
     timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
     base_name = f"NewProductImport_{container.identifier}_{timestamp}"
     try:
-        workbook = build_new_product_workbook(export_items, configuration, container.container_date)
+        workbook = build_new_product_workbook(
+            export_items,
+            configuration,
+            container.container_date,
+            pbp_to_pon_codes=pbp_export_codes,
+        )
         content, extension, content_type = convert_excel_output(workbook, base_name, configuration["TL_EXPORT_FORMAT"])
     except (ValueError, RuntimeError) as exc:
         messages.error(request, str(exc))
@@ -2822,3 +3572,4 @@ def export_new_products(request, pk):
     response = HttpResponse(content, content_type=content_type)
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     return response
+

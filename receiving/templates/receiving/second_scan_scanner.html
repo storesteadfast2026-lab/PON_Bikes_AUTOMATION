@@ -1,0 +1,115 @@
+{% extends "receiving/base.html" %}
+{% block title %}Second Scan · {{ container.identifier }}{% endblock %}
+{% block body_class %}second-scan-page{% endblock %}
+{% block content %}
+<style>
+.second-scan-page .topbar,.second-scan-page .site-footer {display:none}
+.second-scan-page .page {max-width:760px;padding:14px}
+.second-scanner {color:#101828;font-size:18px}
+.second-scanner h1 {font-size:20px;overflow-wrap:anywhere;margin:0 0 16px}
+.second-metrics {display:flex;justify-content:space-between;gap:12px;margin-bottom:12px}
+.second-metrics strong {display:block;font-size:24px}
+.second-scanner input[type=text] {width:100%;box-sizing:border-box;font-size:28px;padding:16px;min-width:0}
+.second-scanner .button {margin:10px 0;padding:14px}
+.second-feedback {margin:12px 0;overflow-wrap:anywhere}
+.second-feedback.error {color:#a01515;background:#fff0f0;padding:12px}
+.second-history {list-style:none;padding:0;margin:12px 0}
+.second-history li {border-bottom:1px solid #d5d8df;padding:16px 0;overflow-wrap:anywhere}
+.second-history strong {display:block;font-size:24px}
+.second-scanner details {margin:14px 0}
+.second-scanner input[type=file] {max-width:100%}
+</style>
+<section class="second-scanner">
+<h1>{{ container.identifier }} | {{ container.customer.code }} | Second Scan</h1>
+<a href="{% url 'receiving:container_detail' container.pk %}">Back to container</a>
+{% if error %}<div class="second-feedback error" role="alert">{{ error }}</div>{% endif %}
+{% if session.imported_at %}
+<div class="second-metrics"><div>Current Location<strong id="second-location">{{ scan_state.location|default:"—" }}</strong></div><div>Scanned / Total<strong id="second-count">{{ scan_state.scanned }} / {{ scan_state.total }}</strong></div></div>
+<div>Expected: <span id="second-phase"></span></div>
+<div id="second-feedback" class="second-feedback" role="status" aria-live="polite"></div>
+<form id="second-scan-form" method="post" action="{% url 'receiving:second_scan_scanner' container.pk %}">
+{% csrf_token %}
+<input id="second-barcode" type="text" name="barcode" aria-label="Scan barcode" placeholder="SCAN BARCODE" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="send" {% if session.finished_at %}disabled{% endif %}>
+<button class="button primary" id="second-register" type="submit" {% if session.finished_at %}disabled{% endif %}>Register scan</button>
+</form>
+<h2>Recent scans</h2><ul id="second-history" class="second-history"></ul>
+<div id="second-downloads" {% if not session.finished_at %}hidden{% endif %}>
+<a class="button primary" href="{% url 'receiving:second_scan_download' container.pk 'serial' %}">Download UPSTOCKSERIALSCAN.CSV</a>
+<a class="button secondary" href="{% url 'receiving:second_scan_download' container.pk 'locations' %}">Download UPWHLOCSSCAN.CSV</a>
+<p>Download only.</p></div>
+<div id="second-controls" {% if session.finished_at %}hidden{% endif %}><button type="button" id="second-finish" class="button secondary">Finish Second Scan</button>
+<details><summary>Pending bike</summary><button type="button" id="second-cancel" class="button secondary">Cancel pending bike</button></details></div>
+{{ scan_state|json_script:"second-state" }}
+{% endif %}
+{% if not session.finished_at %}
+<details {% if not session.imported_at %}open{% endif %}><summary>Import / update STOCK_SERIAL_SCANNING.CSV</summary>
+<p>Finish First Scan and reconcile PRODUCT_MOVES first. Print and attach Movement Number labels before scanning. Only this container's movements are imported.</p>
+<form method="post" enctype="multipart/form-data" action="{% url 'receiving:second_scan_scanner' container.pk %}">{% csrf_token %}<input type="hidden" name="action" value="import"><input type="file" name="file" accept=".csv" required><button class="button secondary" type="submit">Import stock data</button></form>
+<small>Movement / Mov_no / stock_in_mov, Product, Location / Loc, WH_LOC, Serial_no, Long_SKU. Completed bikes remain unchanged.</small>
+{% if session.imported_at %}<p>{{ session.source_name }} · {{ session.imported_at|date:"d/m/Y H:i:s" }}</p>{% endif %}
+</details>
+{% endif %}
+</section>
+{% if session.imported_at %}
+<script>
+(() => {
+  const scanForm = document.getElementById('second-scan-form');
+  const scanInput = document.getElementById('second-barcode');
+  const scanEndpoint = scanForm.getAttribute('action');
+  const registerButton = document.getElementById('second-register');
+  const feedback = document.getElementById('second-feedback');
+  let busy = false, finished = false;
+  function renderState(state) {
+    if (!state) return;
+    finished = state.phase === 'FINISHED';
+    document.getElementById('second-location').textContent = state.location || '—';
+    document.getElementById('second-count').textContent = `${state.scanned} / ${state.total}`;
+    const prompts = {WAITING_LOCATION:'Scan Location (AA010)',WAITING_MOVEMENT:'Scan Movement Number',WAITING_PRODUCT:'Scan physical Product Code',WAITING_SERIAL:'Scan Serial Number',FINISHED:'Second Scan complete'};
+    document.getElementById('second-phase').textContent = (prompts[state.phase] || state.phase) + (state.movement ? ` · Movement ${state.movement} · ${state.expected_product} · ${state.bike_location}` : '');
+    document.getElementById('second-downloads').hidden = !finished;
+    document.getElementById('second-controls').hidden = finished;
+    scanInput.disabled = finished; registerButton.disabled = finished || busy;
+    const history = document.getElementById('second-history');
+    history.replaceChildren();
+    state.recent.forEach(row => {
+      const li = document.createElement('li');
+      const location = document.createElement('div'); location.textContent = `${row.location} · Movement ${row.movement}`;
+      const product = document.createElement('strong'); product.textContent = row.product_code;
+      const serial = document.createElement('strong'); serial.textContent = row.serial;
+      li.append(location, product, serial); history.append(li);
+    });
+  }
+  async function send(action) {
+    if (busy || finished) return;
+    busy = true; scanInput.readOnly = true; registerButton.disabled = true;
+    const data = new FormData();
+    data.set('csrfmiddlewaretoken', scanForm.querySelector('[name=csrfmiddlewaretoken]').value);
+    data.set('action', action); data.set('barcode', scanInput.value);
+    try {
+      const response = await fetch(scanEndpoint, {method:'POST',body:data,headers:{'X-Requested-With':'XMLHttpRequest'}});
+      const result = await response.json();
+      feedback.textContent = result.message;
+      feedback.className = `second-feedback${result.ok ? '' : ' error'}`;
+      renderState(result.state);
+      scanInput.value = '';
+    } catch (error) {
+      feedback.textContent = 'Connection interrupted. Review the current state before retrying.';
+      feedback.className = 'second-feedback error';
+      scanInput.select();
+    } finally {
+      busy = false; scanInput.readOnly = false; registerButton.disabled = finished;
+      if (!finished) {scanInput.focus(); scanInput.select();}
+    }
+  }
+  scanInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.code === 'Enter' || event.keyCode === 13) {event.preventDefault(); if (!event.repeat) send('scan');}
+  });
+  scanForm.addEventListener('submit', event => {event.preventDefault(); send('scan');});
+  document.getElementById('second-finish').addEventListener('click', () => send('finish'));
+  document.getElementById('second-cancel').addEventListener('click', () => send('cancel'));
+  renderState(JSON.parse(document.getElementById('second-state').textContent));
+  if (!finished) scanInput.focus();
+})();
+</script>
+{% endif %}
+{% endblock %}

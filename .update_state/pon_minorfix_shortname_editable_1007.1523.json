@@ -1,0 +1,11 @@
+﻿{
+    "version":  "1007.1523",
+    "status":  "APPLIED",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261007_152720_before_new_product_flow_exact_479c7680",
+    "updated_at":  "2026-10-07T15:27:49.1748714+10:30",
+    "files":  [
+                  "receiving\\forms.py",
+                  "receiving\\tests.py",
+                  "receiving\\templates\\receiving\\product_check.html"
+              ]
+}

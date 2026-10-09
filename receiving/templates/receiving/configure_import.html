@@ -67,6 +67,13 @@
         </div>
 
         <div class="app-field">
+          <label for="{{ form.start_column.id_for_label }}">First preview column</label>
+          {{ form.start_column }}
+          <small>Excel column where the visible source preview starts, for example A or D.</small>
+          {% if form.start_column.errors %}<div class="field-error">{{ form.start_column.errors }}</div>{% endif %}
+        </div>
+
+        <div class="app-field">
           <label for="{{ form.row_step.id_for_label }}">Read every N rows</label>
           {{ form.row_step }}
           <small>Use 1 for every row, or a higher value for spaced rows.</small>
@@ -76,16 +83,16 @@
         <div class="mapping-divider"></div>
 
         <div class="app-field">
-          <label for="{{ form.code_column.id_for_label }}">Bike code column <span class="mapping-confidence {% if mapping_analysis.confidence.code_column >= 95 %}high{% elif mapping_analysis.confidence.code_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.code_column }}%</span></label>
+          <label for="{{ form.code_column.id_for_label }}">Bike code column <span class="optional-label">Optional if LongCode is provided</span> <span class="mapping-confidence {% if mapping_analysis.confidence.code_column >= 95 %}high{% elif mapping_analysis.confidence.code_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.code_column }}%</span></label>
           {{ form.code_column }}
-          <small>Detected: {{ mapping_analysis.field_labels.code_column }} · Column containing the bike / SKU code.</small>
+          <small>Detected: {{ mapping_analysis.field_labels.code_column }} · Leave blank when the Manifest contains only the LongCode.</small>
           {% if form.code_column.errors %}<div class="field-error">{{ form.code_column.errors }}</div>{% endif %}
         </div>
 
         <div class="app-field">
-          <label for="{{ form.long_code_column.id_for_label }}">LongCode column <span class="optional-label">Optional</span> {% if mapping_analysis.confidence.long_code_column %}<span class="mapping-confidence {% if mapping_analysis.confidence.long_code_column >= 95 %}high{% elif mapping_analysis.confidence.long_code_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.long_code_column }}%</span>{% endif %}</label>
+          <label for="{{ form.long_code_column.id_for_label }}">LongCode column <span class="optional-label">Optional if Bike Code is provided</span> {% if mapping_analysis.confidence.long_code_column %}<span class="mapping-confidence {% if mapping_analysis.confidence.long_code_column >= 95 %}high{% elif mapping_analysis.confidence.long_code_column >= 75 %}medium{% else %}low{% endif %}">{{ mapping_analysis.confidence.long_code_column }}%</span>{% endif %}</label>
           {{ form.long_code_column }}
-          <small>Detected: {{ mapping_analysis.field_labels.long_code_column }}</small>
+          <small>Detected: {{ mapping_analysis.field_labels.long_code_column }} · For Santa Cruz 2 CODES manifests, use the LongCode column and leave Bike code blank.</small>
           {% if form.long_code_column.errors %}<div class="field-error">{{ form.long_code_column.errors }}</div>{% endif %}
         </div>
 
@@ -161,17 +168,22 @@
       <div class="app-panel-head workbook-head">
         <div>
           <h2>Validation preview</h2>
-          <p>Preview the workbook with the current mapping before continuing.</p>
+          <p>Preview the real worksheet position with the current mapping before continuing.</p>
         </div>
-        <span class="status-pill {% if mapping_ready %}ready{% else %}warning{% endif %}">
-          {% if mapping_ready %}Mapping ready{% else %}Review mapping{% endif %}
-        </span>
+        <div class="source-preview-actions">
+          <span class="status-pill {% if mapping_ready %}ready{% else %}warning{% endif %}">
+            {% if mapping_ready %}Mapping ready{% else %}Review mapping{% endif %}
+          </span>
+          <button class="button secondary compact" type="button" id="reread-source-file">Re-read source file</button>
+        </div>
       </div>
 
       {% if selected_sheet %}
       <div class="app-stat-strip">
         <div><span class="stat-label">Worksheet</span><strong>{{ selected_sheet.name }}</strong></div>
-        <div><span class="stat-label">Data rows</span><strong>{{ mapping_analysis.data_rows }}</strong></div>
+        <div><span class="stat-label">Data rows</span><strong id="workbook-data-rows">{{ workbook_summary.data_rows }}</strong></div>
+        <div><span class="stat-label">{% if source.kind == "CLIENT" %}Bikes Qty{% else %}Workbook bikes{% endif %}</span><strong id="workbook-bike-units">{{ workbook_summary.bike_units }}</strong></div>
+        {% if source.kind == "CLIENT" %}<div><span class="stat-label">Spare Parts Qty</span><strong id="workbook-spare-units">{{ workbook_summary.spare_units }}</strong></div>{% endif %}
         <div><span class="stat-label">Header row</span><strong>{{ mapping_analysis.header_row }}</strong></div>
         <div><span class="stat-label">Containers</span><strong>{{ detected_containers|length }}</strong></div>
       </div>
@@ -180,9 +192,16 @@
         <span class="preview-status-icon">{% if mapping_ready %}✓{% else %}!{% endif %}</span>
         <div>
           <strong>{% if mapping_ready %}Mapping is ready to preview{% else %}Mapping needs attention{% endif %}</strong>
-          <small>{% if mapping_ready %}Continue to build the normalized import preview.{% else %}Select a worksheet, first data row and bike code column.{% endif %}</small>
+          <small>{% if mapping_ready %}Continue to build the normalized import preview.{% else %}Select a worksheet, first data row, and either a Bike code or LongCode column.{% endif %}</small>
         </div>
       </div>
+
+      <section class="preview-start-card" aria-label="Configured preview start">
+        <strong>Configured start</strong>
+        <span>Row: <b id="preview-start-row">{{ source_preview.start_row }}</b></span>
+        <span>Column: <b id="preview-start-column">{{ source_preview.start_column }}</b></span>
+        <span>First cell used: <b id="preview-first-cell">{{ source_preview.first_cell }}</b></span>
+      </section>
 
       {% if detected_containers %}
       <section class="detected-container-panel">
@@ -191,28 +210,44 @@
           {% for item in detected_containers %}
           <div class="detected-container-row {% if item.is_current %}current{% endif %}">
             <div><strong>{{ item.identifier }}</strong><small>{% if item.is_current %}Current container{% elif item.will_create %}Will be created as PENDING{% elif item.exists %}Existing container — manifest data will be linked{% endif %}</small></div>
-            <div><span>{{ item.rows }} rows</span><strong>{{ item.units }} advised</strong></div>
+            <div><span>{{ item.rows }} rows</span><strong>{{ item.units }} bike{{ item.units|pluralize }}{% if item.spare_units %} · {{ item.spare_units }} spare part{{ item.spare_units|pluralize }}{% endif %}</strong></div>
           </div>
           {% endfor %}
         </div>
       </section>
       {% endif %}
 
-      <div class="workbook-preview-wrap">
-        <table class="app-data-table workbook-preview-table">
+      <div class="workbook-preview-wrap" id="source-preview-wrap" data-preview-url="{% url 'receiving:source_file_preview' source.pk %}">
+        <table class="app-data-table workbook-preview-table" id="source-preview-table">
+          <thead>
+            <tr class="excel-column-row">
+              <th class="preview-corner">Row</th>
+              {% for column in source_preview.columns %}<th>{{ column.letter }}</th>{% endfor %}
+            </tr>
+            <tr class="original-header-row">
+              <th>Original header</th>
+              {% for column in source_preview.columns %}<th title="{{ column.original_header }}">{{ column.original_header|default:"—" }}</th>{% endfor %}
+            </tr>
+            <tr class="mapping-header-row">
+              <th>PON meaning</th>
+              {% for column in source_preview.columns %}<th class="{% if column.meaning == 'Not mapped' %}not-mapped{% endif %}">{{ column.meaning }}</th>{% endfor %}
+            </tr>
+          </thead>
           <tbody>
-            {% for row in selected_sheet.preview %}
-              <tr class="{% if forloop.first %}preview-header-row{% endif %}">
-                <th>{{ row.row }}</th>
+            {% for row in source_preview.rows %}
+              <tr>
+                <th>{{ row.number }}</th>
                 {% for value in row.values %}<td title="{{ value }}">{{ value|truncatechars:38 }}</td>{% endfor %}
               </tr>
+            {% empty %}
+              <tr><th>{{ source_preview.start_row }}</th><td colspan="{{ source_preview.columns|length }}">No cells are available from the configured start.</td></tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
 
-      <div class="preview-note">
-        Showing the first {{ selected_sheet.preview|length }} non-empty rows. The selected worksheet contains {{ mapping_analysis.data_rows }} detected data rows. Low-confidence fields are never forced automatically.
+      <div class="preview-note" id="source-preview-note">
+        Showing {{ source_preview.rows|length }} rows from the configured start in the real worksheet. The selected worksheet contains {{ mapping_analysis.data_rows }} detected data rows. Low-confidence fields are never forced automatically.
       </div>
       {% else %}
         <div class="empty-state">No worksheet data is available for preview.</div>
@@ -244,6 +279,124 @@
     const update = () => { output.textContent = (input.value || "—").trim().toUpperCase() || "—"; };
     input.addEventListener("input", update);
     update();
+  });
+
+  const previewWrap = document.getElementById("source-preview-wrap");
+  const previewTable = document.getElementById("source-preview-table");
+  const rereadButton = document.getElementById("reread-source-file");
+  const previewNote = document.getElementById("source-preview-note");
+  const form = document.getElementById("import-config-form");
+  if (!previewWrap || !previewTable || !rereadButton || !form) return;
+
+  const mappingFields = ["code_column", "long_code_column", "description_column", "quantity_column", "container_column"];
+  let previewRequest = null;
+
+  function field(name) { return form.elements[name]; }
+  function parameters() {
+    const query = new URLSearchParams();
+    ["sheet_name", "start_row", "start_column", "row_step", "required_fill_signature", ...mappingFields].forEach((name) => {
+      const input = field(name);
+      if (input) query.set(name, input.value || "");
+    });
+    const locationStream = field("location_stream");
+    if (locationStream && locationStream.checked) query.set("location_stream", "1");
+    const colouredRowsOnly = field("coloured_rows_only");
+    if (colouredRowsOnly && colouredRowsOnly.checked) query.set("coloured_rows_only", "1");
+    return query;
+  }
+  function cell(tag, text, className) {
+    const item = document.createElement(tag);
+    item.textContent = text;
+    if (className) item.className = className;
+    return item;
+  }
+  function render(preview) {
+    const head = document.createElement("thead");
+    const letterRow = document.createElement("tr");
+    letterRow.className = "excel-column-row";
+    letterRow.appendChild(cell("th", "Row", "preview-corner"));
+    preview.columns.forEach((column) => letterRow.appendChild(cell("th", column.letter)));
+    head.appendChild(letterRow);
+
+    const headerRow = document.createElement("tr");
+    headerRow.className = "original-header-row";
+    headerRow.appendChild(cell("th", "Original header"));
+    preview.columns.forEach((column) => headerRow.appendChild(cell("th", column.original_header || "—")));
+    head.appendChild(headerRow);
+
+    const mappingRow = document.createElement("tr");
+    mappingRow.className = "mapping-header-row";
+    mappingRow.appendChild(cell("th", "PON meaning"));
+    preview.columns.forEach((column) => mappingRow.appendChild(cell("th", column.meaning, column.meaning === "Not mapped" ? "not-mapped" : "")));
+    head.appendChild(mappingRow);
+
+    const body = document.createElement("tbody");
+    if (preview.rows.length) {
+      preview.rows.forEach((row) => {
+        const line = document.createElement("tr");
+        line.appendChild(cell("th", String(row.number)));
+        row.values.forEach((value) => line.appendChild(cell("td", value)));
+        body.appendChild(line);
+      });
+    } else {
+      const line = document.createElement("tr");
+      line.appendChild(cell("th", String(preview.start_row)));
+      const empty = cell("td", "No cells are available from the configured start.");
+      empty.colSpan = Math.max(1, preview.columns.length);
+      line.appendChild(empty);
+      body.appendChild(line);
+    }
+    previewTable.replaceChildren(head, body);
+    document.getElementById("preview-start-row").textContent = preview.start_row;
+    document.getElementById("preview-start-column").textContent = preview.start_column;
+    document.getElementById("preview-first-cell").textContent = preview.first_cell;
+    previewNote.textContent = `Showing ${preview.rows.length} rows from ${preview.first_cell} in the real worksheet.`;
+  }
+  async function refreshPreview(refreshDetection = false) {
+    if (previewRequest) previewRequest.abort();
+    previewRequest = new AbortController();
+    rereadButton.disabled = true;
+    try {
+      const query = parameters();
+      if (refreshDetection) query.set("refresh_detection", "1");
+      const response = await fetch(`${previewWrap.dataset.previewUrl}?${query}`, {
+        headers: {"X-Requested-With": "XMLHttpRequest"},
+        signal: previewRequest.signal
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "The source preview could not be read.");
+      if (refreshDetection) {
+        mappingFields.forEach((name) => {
+          const input = field(name);
+          if (!input) return;
+          input.value = result.detected_mapping[name] || "";
+          const output = document.getElementById(map[input.id]);
+          if (output) output.textContent = (input.value || "—").toUpperCase();
+        });
+      }
+      render(result.preview);
+      if (result.summary) {
+        const dataRows = document.getElementById("workbook-data-rows");
+        const bikeUnits = document.getElementById("workbook-bike-units");
+        const spareUnits = document.getElementById("workbook-spare-units");
+        if (dataRows) dataRows.textContent = result.summary.data_rows;
+        if (bikeUnits) bikeUnits.textContent = result.summary.bike_units;
+        if (spareUnits) spareUnits.textContent = result.summary.spare_units;
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") previewNote.textContent = error.message;
+    } finally {
+      rereadButton.disabled = false;
+    }
+  }
+  rereadButton.addEventListener("click", () => refreshPreview(true));
+  ["start_row", "start_column", "row_step"].forEach((name) => {
+    const input = field(name);
+    if (input) input.addEventListener("input", () => refreshPreview(false));
+  });
+  ["sheet_name", ...mappingFields, "location_stream", "coloured_rows_only", "required_fill_signature"].forEach((name) => {
+    const input = field(name);
+    if (input) input.addEventListener("change", () => refreshPreview(name === "sheet_name"));
   });
 })();
 </script>

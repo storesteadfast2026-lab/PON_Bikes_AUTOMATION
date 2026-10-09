@@ -1,0 +1,11 @@
+﻿{
+    "version":  "1007.1252",
+    "status":  "APPLIED",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261007_125506_before_minimal_first_scan_5efbf475",
+    "updated_at":  "2026-10-07T12:55:34.1503810+10:30",
+    "files":  [
+                  "receiving\\views.py",
+                  "receiving\\test_first_scan_two_codes.py",
+                  "receiving\\templates\\receiving\\first_scan_scanner.html"
+              ]
+}

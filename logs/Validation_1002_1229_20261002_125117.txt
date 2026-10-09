@@ -1,0 +1,91 @@
+﻿Release 1002.1229 verification started 2026-10-02T12:51:17.5272630+09:30
+[PASS] Only the active installation is being verified.
+[PASS] .update_state metadata is locally excluded or legacy tracked; neither prevents the update.
+[PASS] Installed scanner payload matches the corrected package.
+[PASS] .git exists and git status works.
+[PASS] PostgreSQL backup and PRE_UPDATE_COMMIT.txt exist; no app backup was created.
+[PASS] Web completed entrypoint startup without restart or exit.
+
+--- django check ---
+System check identified no issues (0 silenced).
+
+[PASS] Django check passed.
+
+--- receiving migrations ---
+receiving
+ [X] 0001_initial
+ [X] 0002_product_catalog
+ [X] 0003_generatedexport_productdefinition
+ [X] 0004_container_container_date
+ [X] 0005_productcatalogentry_xml_metadata
+ [X] 0006_group1_family_mapping
+ [X] 0007_short_name_dictionary_rule
+ [X] 0008_stage2_product_moves
+ [X] 0009_client_receiving_report
+ [X] 0010_customer_product_catalog_configuration
+ [X] 0011_container_job_order
+ [X] 0012_product_master_xls
+ [X] 0013_multi_container_job_order
+ [X] 0014_alter_shortnamedictionaryrule_confidence_and_more
+ [X] 0015_original_import_selection
+ [X] 0016_first_scan_scanner
+
+[PASS] 0015 and 0016 are applied exactly once in migration state.
+
+--- migration state check ---
+No changes detected
+
+[PASS] No model changes are missing migrations.
+
+--- scanner tables ---
+missing= []
+
+[PASS] All four scanner tables exist.
+
+--- complete receiving test suite ---
+Found 102 test(s).
+docker.exe : Creating test database for alias 'default'...
+At C:\Users\fabian\Downloads\PON_Bikes_Automation_Update_1002.1229\PON_Bikes_Automation_Update_1002.1229\04_Verify_Update.ps1:89 
+char:19
++ ...   $tests = (& docker compose exec -T web python manage.py test receiv ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Creating test d...as 'default'...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+System check identified no issues (0 silenced).
+......................................................................................................
+----------------------------------------------------------------------
+Ran 102 tests in 13.160s
+
+OK
+Destroying test database for alias 'default'...
+
+[PASS] Complete receiving test suite passed.
+[PASS] Existing operational receiving row counts are unchanged.
+
+--- scanner Enter JavaScript tests ---
+Γ£ö Enter registers a pallet and updates the displayed current pallet (6.3825ms)
+Γ£ö Enter registers CODE through the existing scan POST (1.8181ms)
+Γ£ö Enter registers LONG_CODE through the existing scan POST (0.91ms)
+Γ£ö manual button form submit remains a fallback (0.9582ms)
+Γ£ö missing action attribute falls back to current URL despite the named action input (0.8122ms)
+Γ£ö Enter plus submit and repeated keydown make exactly one request/event (0.8767ms)
+Γ£ö success clears input and restores focus/readiness (0.9046ms)
+Γ£ö continuous consecutive scans need no touch or confirmation (0.9537ms)
+Γ£ö handled invalid barcode clears/refocuses without increasing bike counts (0.9462ms)
+Γ£ö failed network keeps/selects value, unlocks input and does not retry automatically (1.6073ms)
+Γ£ö keyboard-wedge Enter keyCode works without a virtual keyboard (0.7781ms)
+Γ£ö history without secondary code has exactly two lines and no empty placeholder (0.8501ms)
+Γ£ö two-code server states update the prompt and pending history without extra confirmation (0.9039ms)
+Γ£ö one-code prompt and reloaded two-code pending prompt use persisted server state (0.9773ms)
+Γä╣ tests 14
+Γä╣ suites 0
+Γä╣ pass 14
+Γä╣ fail 0
+Γä╣ cancelled 0
+Γä╣ skipped 0
+Γä╣ todo 0
+Γä╣ duration_ms 109.4346
+
+[PASS] Scanner Enter JavaScript tests passed.
+[PASS] HTTP responded on port 8001.

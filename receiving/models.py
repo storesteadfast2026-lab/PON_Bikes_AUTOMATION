@@ -42,6 +42,10 @@ class Container(models.Model):
         ("READY", "Ready for Translogic"),
         ("CLOSED", "Closed"),
     ]
+    FIRST_SCAN_CODE_MODE_CHOICES = [
+        ("ONE_CODE", "1 CODE"),
+        ("TWO_CODES", "2 CODES"),
+    ]
 
     identifier = models.CharField(max_length=30, unique=True)
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name="containers")
@@ -55,6 +59,12 @@ class Container(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="OPEN")
     auto_created_from_manifest = models.BooleanField(default=False)
     manifest_source_name = models.CharField(max_length=255, blank=True)
+    first_scan_code_mode = models.CharField(
+        max_length=10,
+        choices=FIRST_SCAN_CODE_MODE_CHOICES,
+        blank=True,
+        help_text="Container-wide First Scan bike mode, selected once before scanning.",
+    )
     notes = models.TextField(blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_containers")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -611,3 +621,50 @@ class FirstScanPhoto(models.Model):
 
     class Meta:
         ordering = ["-captured_at", "-id"]
+
+
+class SecondScanMovement(models.Model):
+    """Translogic expectation and verified physical bike; never First Scan data."""
+    container = models.ForeignKey(Container, on_delete=models.CASCADE, related_name="second_scan_movements")
+    movement = models.CharField(max_length=10)
+    expected_product = models.CharField(max_length=100)
+    source_location = models.CharField(max_length=30, blank=True)
+    wh_loc = models.CharField(max_length=30, blank=True)
+    existing_serial = models.CharField(max_length=160, blank=True)
+    long_sku = models.CharField(max_length=160, blank=True)
+    product_code = models.CharField(max_length=100, blank=True)
+    serial = models.CharField(max_length=160, blank=True)
+    location = models.CharField(max_length=5, blank=True)
+    movement_scanned_at = models.DateTimeField(null=True, blank=True)
+    product_verified_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    scanned_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.UniqueConstraint(fields=["container", "movement"], name="unique_second_scan_container_movement"),
+            models.UniqueConstraint(models.functions.Lower(models.functions.Right("serial", 16)), condition=~models.Q(serial=""), name="unique_second_scan_serial"),
+            models.CheckConstraint(condition=(
+                models.Q(completed_at__isnull=True, serial="", product_code="", product_verified_at__isnull=True)
+                | (models.Q(completed_at__isnull=False, product_verified_at__isnull=False,
+                            movement_scanned_at__isnull=False, product_code=models.F("expected_product"))
+                   & ~models.Q(serial="") & ~models.Q(location=""))
+            ), name="second_scan_requires_product_validation"),
+        ]
+
+
+class SecondScanSession(models.Model):
+    container = models.OneToOneField(Container, on_delete=models.CASCADE, related_name="second_scan_session")
+    current_location = models.CharField(max_length=5, blank=True)
+    pending_movement = models.ForeignKey(SecondScanMovement, on_delete=models.PROTECT, null=True, blank=True)
+    pending_location = models.CharField(max_length=5, blank=True)
+    movement_scanned_at = models.DateTimeField(null=True, blank=True)
+    product_verified_at = models.DateTimeField(null=True, blank=True)
+    imported_at = models.DateTimeField(null=True, blank=True)
+    source_name = models.CharField(max_length=255, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True)
+    known_serials = models.JSONField(default=list, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)

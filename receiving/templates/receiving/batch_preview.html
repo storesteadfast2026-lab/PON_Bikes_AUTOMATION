@@ -83,4 +83,42 @@
     {% if current_present %}<button class="button primary">Confirm import →</button>{% else %}<button class="button primary" disabled title="Current container is not present in the manifest">Confirm import →</button>{% endif %}
   </form>
 </div>
+{# PON_CLIENT_PREVIEW_CODE_DISPLAY_1008.1134 #}
+<script data-client-preview-code-mask="PON_CLIENT_PREVIEW_CODE_DISPLAY_1008.1134">
+(function () {
+  function nh(v) { return (v || '').toLowerCase().replace(/[\s_\-\/]+/g, ''); }
+  function nc(v) { var x=(v || '').trim(); return (x==='-' || x==='--' || x==='---') ? '' : x; }
+  function run() {
+    var body=(document.body && document.body.innerText) || '';
+    if (!/validate\s+preview/i.test(body) && !/confirm\s+import/i.test(body)) return;
+    document.querySelectorAll('table').forEach(function(table) {
+      var hs=Array.from(table.querySelectorAll('thead th')), ci=-1, li=-1;
+      hs.forEach(function(th,i) {
+        var h=nh(th.textContent);
+        if (h==='code' || h==='bikecode' || h==='productcode') ci=i;
+        if (h==='longcode' || h==='secondarycode') li=i;
+      });
+      if (ci<0 || li<0 || ci===li) return;
+      var a=[];
+      Array.from(table.querySelectorAll('tbody tr')).forEach(function(tr) {
+        var c=Array.from(tr.children);
+        if (c.length<=Math.max(ci,li)) return;
+        if (c[ci].querySelector('input,select,textarea') || c[li].querySelector('input,select,textarea')) return;
+        var cv=nc(c[ci].textContent), lv=nc(c[li].textContent);
+        if (cv && lv) a.push({cell:c[ci], code:cv, longcode:lv});
+      });
+      if (!a.length) return;
+      if (!a.every(function(x) { return x.code.toUpperCase()===x.longcode.toUpperCase(); })) return;
+      a.forEach(function(x) {
+        x.cell.textContent='-';
+        x.cell.setAttribute('data-source-code-not-provided','true');
+        x.cell.setAttribute('title','Bike Code was not supplied by the client manifest. Internal Code/LongCode association is retained.');
+      });
+      table.setAttribute('data-client-longcode-fallback-masked','true');
+    });
+  }
+  if (document.readyState==='loading') document.addEventListener('DOMContentLoaded',run); else run();
+})();
+</script>
+
 {% endblock %}

@@ -1,0 +1,10 @@
+﻿{
+    "version":  "1007.1319",
+    "status":  "AUTO_ROLLED_BACK",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\20261007_133138_before_manifest_context_group1_d5f2bdee",
+    "updated_at":  "2026-10-07T13:32:06.6402393+10:30",
+    "files":  [
+                  "receiving\\views.py",
+                  "receiving\\tests.py"
+              ]
+}

@@ -49,7 +49,7 @@
       <h2>Product data for Translogic</h2>
       <p class="muted">Enter Length, Height and Width in centimetres only for products that still require manual Translogic data. PBP → PON products reuse valid historical Translogic dimensions and weight automatically. Django stores manually entered dimensions in millimetres. Group1 is always resolved through the current PON family mapping; the historical PBP Group1 is never copied directly. Group2 follows the existing cubic rule.</p>
       <p class="muted">Current product-master dictionary: <strong>{{ name_dictionary_exact_count }}</strong> reliable historical name matches and <strong>{{ name_dictionary_rule_count }}</strong> learned abbreviation rules.</p>
-      <p><strong>{{ saved_definition_count }} saved</strong> · <strong>{{ pending_definition_count }} pending</strong>. All four numeric fields are required before the data can be saved. Use <strong>Tab</strong> to move across the row; when a blank row is reached, the closest complete measurements above are proposed automatically.</p>
+      <p><strong>{{ saved_definition_count }} saved</strong> · <strong>{{ pending_definition_count }} pending</strong>. Code, Long code and Long name come from the confirmed source data and stay locked here. Short name can be reviewed or entered manually when no automatic proposal is available. Use <strong>Tab</strong> to move through Short name, Length, Height, Width and Weight; when a blank measurement row is reached, the closest complete measurements above are proposed automatically.</p>
     </div>
     <div class="suggestion-key" aria-label="Suggested value colour key">
       <span><i class="key-chip suggested"></i> Proposed from previous row</span>
@@ -265,4 +265,352 @@
   });
 })();
 </script>
+
+<!-- PON_REPLICATE_VALUES_1007.1534_BEGIN -->
+<style>
+/* Contextual New Product measurement replication. Front-end only; Save product data remains authoritative. */
+.replicate-values-toolbar{position:sticky;top:8px;z-index:25;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 10px;padding:10px 12px;border:1px solid #dbe3ef;border-radius:10px;background:#f8fafc;box-shadow:0 4px 16px rgba(15,23,42,.08)}
+.replicate-values-toolbar .replicate-status{font-size:13px;color:#475467;min-height:1.2em}
+.replicate-row-selector{display:inline-flex;align-items:center;gap:6px;margin-right:8px;color:#667085;font-size:12px;font-weight:700;white-space:nowrap}
+.replicate-row-selector input{margin:0}
+.replicate-dialog{width:min(620px,calc(100vw - 32px));border:0;border-radius:14px;padding:0;box-shadow:0 24px 70px rgba(15,23,42,.28)}
+.replicate-dialog::backdrop{background:rgba(15,23,42,.48)}
+.replicate-dialog-inner{padding:20px}
+.replicate-dialog h3{margin:0 0 4px;font-size:21px}
+.replicate-dialog .replicate-help{margin:0 0 16px;color:#667085;font-size:13px}
+.replicate-dialog fieldset{border:1px solid #e4e7ec;border-radius:10px;padding:12px;margin:0 0 12px}
+.replicate-dialog legend{padding:0 6px;font-weight:700;font-size:13px}
+.replicate-dialog label{font-size:13px;font-weight:600}
+.replicate-dialog input[type="number"]{border:1px solid #d0d5dd;border-radius:8px;padding:8px 9px;background:white;font:inherit}
+.replicate-source-current{display:grid;grid-template-columns:110px 1fr;gap:10px;align-items:center;margin-bottom:12px}
+.replicate-source-current strong{font-size:14px}
+.replicate-radio-list,.replicate-check-list{display:grid;gap:9px}
+.replicate-choice{display:flex;align-items:center;gap:8px}
+.replicate-through{display:grid;grid-template-columns:auto 90px auto;gap:8px;align-items:center;margin:9px 0 0 25px}
+.replicate-field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.replicate-error{min-height:20px;margin:4px 0 0;color:#b42318;font-size:13px;font-weight:600}
+.replicate-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.replicated-value{box-shadow:0 0 0 2px rgba(21,94,239,.12)}
+@media(max-width:700px){.replicate-source-current{grid-template-columns:1fr}.replicate-through{grid-template-columns:auto 1fr auto}.replicate-field-grid{grid-template-columns:1fr}.replicate-actions{flex-direction:column-reverse}.replicate-actions button{width:100%}}
+</style>
+<script>
+(function () {
+  'use strict';
+
+  const form = document.getElementById('new-product-form');
+  if (!form) return;
+  // PON_PBP_GREEN_NEW_BLOCK_1008_1500: server orders known definitions first; replication sees only the truly new tail.
+  const rows = Array.from(form.querySelectorAll('.new-product-row')).slice({{ replication_start_index|default:0 }});
+  if (!rows.length) return;
+  if (form.dataset.ponReplicateValues === '1007.1534') return;
+  form.dataset.ponReplicateValues = '1007.1534';
+
+  const measures = [
+    { key: 'length', label: 'Length' },
+    { key: 'height', label: 'Height' },
+    { key: 'width', label: 'Width' },
+    { key: 'weight', label: 'Weight' }
+  ];
+  let activeSourceIndex = 0;
+  let dialogSourceIndex = 0;
+
+  function productCode(row) {
+    return (row.dataset.productCode || '').trim() || 'row';
+  }
+
+  function measureInput(row, key) {
+    return row.querySelector('[data-measure="' + key + '"]');
+  }
+
+  function optionLabel(row, index) {
+    return '#' + (index + 1) + ' · ' + productCode(row);
+  }
+
+  function makeElement(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (typeof text === 'string') node.textContent = text;
+    return node;
+  }
+
+  const toolbar = makeElement('div', 'replicate-values-toolbar');
+  toolbar.setAttribute('data-pon-replicate-toolbar', '1007.1534');
+  const openButton = makeElement('button', 'button secondary', 'Replicate current bike');
+  openButton.type = 'button';
+  const status = makeElement('span', 'replicate-status', 'Work in a bike row; replication uses that bike automatically.');
+  toolbar.appendChild(openButton);
+  toolbar.appendChild(status);
+
+  function setActiveSource(index) {
+    if (!Number.isInteger(index) || index < 0 || index >= rows.length) return;
+    activeSourceIndex = index;
+    openButton.textContent = 'Replicate current bike';
+    status.textContent = 'Source bike ' + productCode(rows[index]) + '. Values are not saved until Save product data.';
+  }
+
+  rows.forEach(function (row, index) {
+    row.dataset.replicateRow = String(index + 1);
+    row.addEventListener('focusin', function () { setActiveSource(index); });
+    row.addEventListener('click', function (event) {
+      if (!event.target.closest('.replicate-row-selector')) setActiveSource(index);
+    });
+
+    const codeLine = row.querySelector('.product-code-line');
+    if (codeLine && !codeLine.querySelector('.replicate-row-selector')) {
+      const selector = makeElement('label', 'replicate-row-selector');
+      selector.title = 'Select this row as an optional replication target';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'replicate-target-checkbox';
+      checkbox.tabIndex = -1;
+      checkbox.setAttribute('aria-label', 'Select row ' + (index + 1) + ' for replication');
+      checkbox.addEventListener('click', function (event) { event.stopPropagation(); });
+      selector.appendChild(checkbox);
+      selector.appendChild(document.createTextNode('#' + (index + 1)));
+      codeLine.insertBefore(selector, codeLine.firstChild);
+    }
+  });
+
+  const header = form.querySelector('.new-product-grid-header');
+  if (header) form.insertBefore(toolbar, header);
+  else form.insertBefore(toolbar, form.firstChild);
+  setActiveSource(0);
+
+  const dialog = makeElement('dialog', 'replicate-dialog');
+  dialog.setAttribute('aria-labelledby', 'replicate-dialog-title');
+  const inner = makeElement('div', 'replicate-dialog-inner');
+  const title = makeElement('h3', '', 'Replicate measurements');
+  title.id = 'replicate-dialog-title';
+  const help = makeElement('p', 'replicate-help', 'The bike where you are working is the source automatically. Enter how many following bikes should receive the same measurements; no row number is needed.');
+  inner.appendChild(title);
+  inner.appendChild(help);
+
+  const sourceWrap = makeElement('div', 'replicate-source-current');
+  sourceWrap.appendChild(makeElement('span', '', 'Source bike'));
+  const sourceValue = makeElement('strong', '', '');
+  sourceWrap.appendChild(sourceValue);
+  inner.appendChild(sourceWrap);
+
+  const targetFieldset = document.createElement('fieldset');
+  const targetLegend = document.createElement('legend');
+  targetLegend.textContent = 'Apply to';
+  targetFieldset.appendChild(targetLegend);
+  const targetList = makeElement('div', 'replicate-radio-list');
+
+  function radioChoice(value, text, checked) {
+    const label = makeElement('label', 'replicate-choice');
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'replicate-target-mode';
+    radio.value = value;
+    radio.checked = Boolean(checked);
+    label.appendChild(radio);
+    label.appendChild(document.createTextNode(text));
+    targetList.appendChild(label);
+    return radio;
+  }
+
+  const rangeRadio = radioChoice('range', 'Next bikes (quantity)', true);
+  const allRadio = radioChoice('all', 'All new bikes', false);
+  const selectedRadio = radioChoice('selected', 'Selected rows', false);
+  targetFieldset.appendChild(targetList);
+
+  const repeatWrap = makeElement('div', 'replicate-through');
+  const repeatLabel = makeElement('label', '', 'Repeat to next');
+  repeatLabel.htmlFor = 'replicate-repeat-count';
+  const repeatInput = document.createElement('input');
+  repeatInput.type = 'number';
+  repeatInput.id = 'replicate-repeat-count';
+  repeatInput.min = '1';
+  repeatInput.step = '1';
+  const repeatSuffix = makeElement('span', 'replicate-count-suffix', 'bike(s)');
+  repeatWrap.appendChild(repeatLabel);
+  repeatWrap.appendChild(repeatInput);
+  repeatWrap.appendChild(repeatSuffix);
+  targetFieldset.appendChild(repeatWrap);
+  inner.appendChild(targetFieldset);
+
+  const fieldsFieldset = document.createElement('fieldset');
+  const fieldsLegend = document.createElement('legend');
+  fieldsLegend.textContent = 'Fields';
+  fieldsFieldset.appendChild(fieldsLegend);
+  const fieldsGrid = makeElement('div', 'replicate-field-grid');
+  const fieldChecks = {};
+  measures.forEach(function (measure) {
+    const label = makeElement('label', 'replicate-choice');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = true;
+    checkbox.value = measure.key;
+    fieldChecks[measure.key] = checkbox;
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode(measure.label));
+    fieldsGrid.appendChild(label);
+  });
+  fieldsFieldset.appendChild(fieldsGrid);
+  inner.appendChild(fieldsFieldset);
+
+  const behaviourFieldset = document.createElement('fieldset');
+  const behaviourLegend = document.createElement('legend');
+  behaviourLegend.textContent = 'Existing values';
+  behaviourFieldset.appendChild(behaviourLegend);
+  const behaviourList = makeElement('div', 'replicate-radio-list');
+  const blanksLabel = makeElement('label', 'replicate-choice');
+  const blanksRadio = document.createElement('input');
+  blanksRadio.type = 'radio';
+  blanksRadio.name = 'replicate-existing-mode';
+  blanksRadio.value = 'blank';
+  blanksRadio.checked = true;
+  blanksLabel.appendChild(blanksRadio);
+  blanksLabel.appendChild(document.createTextNode('Only fill blank values'));
+  const overwriteLabel = makeElement('label', 'replicate-choice');
+  const overwriteRadio = document.createElement('input');
+  overwriteRadio.type = 'radio';
+  overwriteRadio.name = 'replicate-existing-mode';
+  overwriteRadio.value = 'overwrite';
+  overwriteLabel.appendChild(overwriteRadio);
+  overwriteLabel.appendChild(document.createTextNode('Overwrite existing values'));
+  behaviourList.appendChild(blanksLabel);
+  behaviourList.appendChild(overwriteLabel);
+  behaviourFieldset.appendChild(behaviourList);
+  inner.appendChild(behaviourFieldset);
+
+  const error = makeElement('p', 'replicate-error');
+  error.setAttribute('role', 'alert');
+  inner.appendChild(error);
+
+  const actions = makeElement('div', 'replicate-actions');
+  const cancelButton = makeElement('button', 'button secondary', 'Cancel');
+  cancelButton.type = 'button';
+  const applyButton = makeElement('button', 'button primary', 'Apply values');
+  applyButton.type = 'button';
+  actions.appendChild(cancelButton);
+  actions.appendChild(applyButton);
+  inner.appendChild(actions);
+  dialog.appendChild(inner);
+  document.body.appendChild(dialog);
+
+  function updateRangeEnabled() {
+    const enabled = rangeRadio.checked;
+    repeatInput.disabled = !enabled;
+  }
+  [rangeRadio, allRadio, selectedRadio].forEach(function (radio) {
+    radio.addEventListener('change', updateRangeEnabled);
+  });
+  updateRangeEnabled();
+
+  function selectedMeasures() {
+    return measures.filter(function (measure) { return fieldChecks[measure.key].checked; });
+  }
+
+  function targetRows(sourceIndex) {
+    if (rangeRadio.checked) {
+      const available = rows.length - sourceIndex - 1;
+      const repeatCount = Number.parseInt(repeatInput.value, 10);
+      if (available <= 0) {
+        throw new Error('The source is already the last bike.');
+      }
+      if (!Number.isInteger(repeatCount) || repeatCount < 1 || repeatCount > available) {
+        throw new Error('Enter a quantity between 1 and ' + available + ' bike(s).');
+      }
+      return rows.slice(sourceIndex + 1, sourceIndex + 1 + repeatCount);
+    }
+    if (selectedRadio.checked) {
+      const selected = rows.filter(function (row, index) {
+        const checkbox = row.querySelector('.replicate-target-checkbox');
+        return index !== sourceIndex && checkbox && checkbox.checked;
+      });
+      if (!selected.length) throw new Error('Select at least one target row other than the source.');
+      return selected;
+    }
+    return rows.filter(function (_, index) { return index !== sourceIndex; });
+  }
+
+  function setCopiedValue(input, value, overwrite) {
+    if (!input) return false;
+    const current = input.value.trim();
+    if (!overwrite && current !== '') return false;
+    if (current === value) return false;
+    input.value = value;
+    input.classList.remove('suggested-value');
+    input.classList.add('changed-value', 'replicated-value');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    window.setTimeout(function () { input.classList.remove('replicated-value'); }, 900);
+    return true;
+  }
+
+  openButton.addEventListener('click', function () {
+    error.textContent = '';
+    dialogSourceIndex = activeSourceIndex;
+    sourceValue.textContent = productCode(rows[dialogSourceIndex]);
+    const available = rows.length - dialogSourceIndex - 1;
+    repeatInput.max = String(Math.max(available, 1));
+    repeatInput.value = available > 0 ? '1' : '';
+    rangeRadio.checked = true;
+    updateRangeEnabled();
+    dialog.showModal();
+    if (available > 0) {
+      window.setTimeout(function () {
+        repeatInput.focus();
+        repeatInput.select();
+      }, 0);
+    }
+  });
+
+  repeatInput.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      applyButton.click();
+    }
+  });
+
+  cancelButton.addEventListener('click', function () { dialog.close(); });
+
+  applyButton.addEventListener('click', function () {
+    error.textContent = '';
+    try {
+      const sourceIndex = dialogSourceIndex;
+      if (!Number.isInteger(sourceIndex) || !rows[sourceIndex]) throw new Error('Choose a valid source row.');
+      const fields = selectedMeasures();
+      if (!fields.length) throw new Error('Select at least one field to replicate.');
+
+      const source = rows[sourceIndex];
+      const sourceValues = {};
+      fields.forEach(function (measure) {
+        const input = measureInput(source, measure.key);
+        const value = input ? input.value.trim() : '';
+        if (!value) throw new Error('Source row ' + (sourceIndex + 1) + ' has no ' + measure.label + ' value.');
+        sourceValues[measure.key] = value;
+      });
+
+      const targets = targetRows(sourceIndex);
+      const overwrite = overwriteRadio.checked;
+      let changedRows = 0;
+      targets.forEach(function (row) {
+        let rowChanged = false;
+        fields.forEach(function (measure) {
+          if (setCopiedValue(measureInput(row, measure.key), sourceValues[measure.key], overwrite)) rowChanged = true;
+        });
+        if (rowChanged) changedRows += 1;
+      });
+
+      status.textContent = changedRows
+        ? 'Values copied from bike ' + productCode(source) + ' to ' + changedRows + ' bike(s). Review them before saving.'
+        : 'No values changed. Existing values were preserved.';
+      dialog.close();
+
+      const nextRow = rows[sourceIndex + 1];
+      const nextLength = nextRow ? measureInput(nextRow, 'length') : null;
+      if (nextLength) {
+        setActiveSource(sourceIndex + 1);
+        nextLength.focus();
+      }
+    } catch (replicateError) {
+      error.textContent = replicateError.message || String(replicateError);
+    }
+  });
+})();
+</script>
+<!-- PON_REPLICATE_VALUES_1007.1534_END -->
 {% endblock %}
