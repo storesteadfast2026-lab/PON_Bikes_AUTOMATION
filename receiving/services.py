@@ -1023,9 +1023,10 @@ def parse_product_moves_csv(source):
 def reconcile_product_movements(received_lines, movement_rows):
     """Match each Translogic movement to one physical bike from the first scan.
 
-    Matching is by product code, not by global row position. Within each product,
-    the first-scan source-row order is retained. The source row becomes serial_no,
-    exactly as in the verified legacy UPStockSerial.csv process.
+    Matching is by product code, not by global row position. For each product,
+    reproduce the historical Excel Form1 sorting: CODE, LONGCODE, then pallet
+    location (ascending), with the source-row order retained as a stable tie-break.
+    The original source row is preserved as serial_no; it is NEVER re-numbered.
     """
     units_by_product = defaultdict(list)
     issues = []
@@ -1055,7 +1056,27 @@ def reconcile_product_movements(received_lines, movement_rows):
             continue
         serials.add(serial_no)
         units_by_product[product].append(
-            {"product": product, "serial_no": serial_no, "location": location, "source_row": line.source_row}
+            {
+                "product": product,
+                "serial_no": serial_no,
+                "location": location,
+                "source_row": line.source_row,
+                "long_code": str(getattr(line, "long_code", "") or "").strip().upper(),
+            }
+        )
+
+    # Historical Excel Form1 sort: CODE, LONGCODE, Loc (all ascending).
+    # CODE is already the grouping key. Excel sorts blank LONGCODE cells after
+    # non-blank text. Python sorting is stable, so ties retain source-row order.
+    # This is a presentation/association change only: original serial_no and
+    # physical locations remain attached to the same individual bike.
+    for units in units_by_product.values():
+        units.sort(
+            key=lambda unit: (
+                not bool(unit["long_code"]),
+                unit["long_code"],
+                unit["location"],
+            )
         )
 
     received_counts = Counter({product: len(units) for product, units in units_by_product.items()})

@@ -1,0 +1,17 @@
+﻿{
+    "package_id":  "PON.NewProductImport.Update.PBPGroup1Mapping.Fix1.v1020.1240",
+    "project":  "C:\\Docker-Projects\\PON_Bikes_Automation",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\NewProductPBPGroup1_20261020_124137_637",
+    "installed_at":  "2026-10-20T12:42:33.1289668+10:30",
+    "previous_context":  "Fix4",
+    "old_views_sha256":  "f90618f9ab3273a1965a70f241b27a65ecce1deda81351af817338f710409d31",
+    "new_views_sha256":  "0a42e945ede02e1f71347a4676d02d25ddfde715f794d7ffe1c19422caa4be5e",
+    "new_test_sha256":  "694c11fac4977033c65654e56416838fcfa47cd4e30470ffc031ea550809d388",
+    "test_created_by_package":  true,
+    "database_schema_changed":  false,
+    "baseline_django_status":  "KNOWN_UI_BASELINE",
+    "candidate_django_status":  "KNOWN_UI_BASELINE",
+    "baseline_count":  176,
+    "candidate_count":  188,
+    "known_ui_failure_remains":  true
+}

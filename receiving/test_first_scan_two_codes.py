@@ -320,34 +320,50 @@ class FirstScanTwoCodesTests(TestCase):
         self.assertEqual(response.json()["state"]["pallet_position"], 1)
         self.assertEqual(response.json()["state"]["expected_pallet_count"], 3)
 
-    def test_recent_history_spans_pallets_and_keeps_two_scanned_codes(self):
+    def test_history_pallet_blocks_newest_first_and_code_pairs(self):
         self.start()
         self.scan("T4191")
         self.complete_bike("192219461014")
         self.scan("T4192")
         _, response = self.complete_bike("192219461015")
-        recent = response.json()["state"]["recent"]
-        self.assertEqual([item["pallet"] for item in recent[:2]], ["T4192", "T4191"])
-        self.assertEqual(recent[0]["resolved_code"], "192219461015")
-        self.assertEqual(recent[0]["long_code"], ANNOUNCED_LONG_CODE)
+        blocks = response.json()["state"]["history_blocks"]
+        self.assertEqual([(b["number"], b["pallet"]) for b in blocks], [(2, "T4192"), (1, "T4191")])
+        self.assertEqual(blocks[0]["bikes"][0]["code"], "192219461015")
+        self.assertEqual(blocks[0]["bikes"][0]["long_code"], ANNOUNCED_LONG_CODE)
 
-    def test_live_scanner_page_is_minimal_and_history_starts_with_pallet(self):
+    def test_return_to_previous_pallet_creates_new_numbered_block(self):
+        self.start()
+        self.scan("T4191")
+        self.complete_bike("192219461014")
+        self.scan("T4192")
+        self.scan("T4191")
+        _, response = self.complete_bike("192219461015")
+        blocks = response.json()["state"]["history_blocks"]
+        self.assertEqual([(b["number"], b["pallet"]) for b in blocks],
+                         [(3, "T4191"), (2, "T4192"), (1, "T4191")])
+        self.assertEqual(len(blocks[0]["bikes"]), 1)
+        self.assertEqual(len(blocks[-1]["bikes"]), 1)
+
+    def test_duplicate_pallet_scan_does_not_create_extra_block(self):
+        self.start()
+        self.scan("T4191")
+        response = self.scan("T4191")
+        self.assertEqual(len(response.json()["state"]["history_blocks"]), 1)
+
+    def test_live_scanner_page_shows_single_line_identifiers_and_history(self):
         self.start()
         self.scan("T4191")
         self.complete_bike("192219461014")
         response = self.client.get(self.url)
         html = response.content.decode()
-        self.assertNotIn("Last result", html)
-        self.assertNotIn('id="container-progress"', html)
-        self.assertNotIn('id="pallet-progress"', html)
-        self.assertNotIn('class="scanner-summary-grid"', html)
-        self.assertIn("Current pallet:", html)
-        self.assertIn("Recent scans", html)
-        self.assertIn("scanner-history-code", html)
-        history_start = html.index('<tbody id="recent-scans-body">')
-        history_end = html.index('</tbody>', history_start)
-        history_html = html[history_start:history_end]
-        self.assertLess(history_html.index("T4191"), history_html.index("192219461014"))
+        self.assertIn("PON – First Scan – CON20 – TIIU4062052", html)
+        self.assertIn('aria-label="Pause scanning"', html)
+        self.assertNotIn("Current pallet:", html)
+        self.assertNotIn("Recent scans", html)
+        self.assertNotIn("<th>Result</th>", html)
+        self.assertIn('id="scanner-history-blocks"', html)
+        history_html = html[html.index('id="scanner-history-blocks"'):]
+        self.assertLess(history_html.index("01-T4191"), history_html.index("192219461014"))
         self.assertLess(history_html.index("192219461014"), history_html.index(ANNOUNCED_LONG_CODE))
 
     def test_one_code_mode_keeps_existing_registration_logic(self):

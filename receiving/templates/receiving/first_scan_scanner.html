@@ -3,31 +3,34 @@
 {% block body_class %}first-scan-page{% endblock %}
 {% block content %}
 <style>
-  .scanner-title-pallet { white-space: nowrap; font-size: .72em; color: var(--blue-dark); }
-  .scanner-current-pallet-line { padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: #f8fafc; font-size: 14px; }
-  .scanner-current-pallet-line strong { margin-left: 6px; font: 850 18px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; }
-  .scanner-history-table th:first-child, .scanner-history-table td:first-child { width: 120px; }
-  .scanner-history-pallet { font-weight: 850; font-size: 15px; white-space: nowrap; vertical-align: top; }
+  .scanner-header { align-items: center; flex-direction: row; flex-wrap: nowrap; gap: 8px; }
+  .scanner-header-identifiers { min-width: 0; flex: 1; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
+  .scanner-header-identifiers h1 { font-size: clamp(13px, 2vw, 24px); margin: 0; white-space: nowrap; }
+  .scanner-header-actions { display: flex; align-items: center; flex-shrink: 0; gap: 6px; }
+  .scanner-header-actions form { margin: 0; }
+  .scanner-icon-control { width: 44px; height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 20px; }
+  .scanner-history-block + .scanner-history-block { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
+  .scanner-history-block-title { font-weight: 850; font-size: 17px; margin: 0 0 9px; overflow-wrap: anywhere; }
+  .scanner-history-bike { padding: 4px 0 7px 16px; }
   .scanner-history-code { font: 850 17px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
-  .scanner-history-long { margin-top: 4px; font: 750 15px/1.25 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; }
-  @media (max-width: 700px) {
-    .scanner-title-pallet { display: block; margin-top: 4px; }
-    .scanner-history-table th:first-child, .scanner-history-table td:first-child { width: 88px; }
-  }
+  .scanner-history-long { margin: 4px 0 0 16px; font: 750 15px/1.25 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; }
+  .scanner-feedback.success { display: none; }
+  @media (max-width: 820px) { .scanner-header { flex-direction: row; align-items: center; } }
+  @media (max-width: 560px) { .scanner-header-actions .scanner-back-link { display: none; } }
 </style>
 <div class="scanner-shell">
   <div class="scanner-header">
-    <div>
-      <p class="eyebrow">First Scan</p>
-      <h1>
-        {{ container.identifier }}
-        {% if session %}
-        <span class="scanner-title-pallet">· Pallet <span id="pallet-position">{% if scanner_state.pallet_position %}{{ scanner_state.pallet_position }}{% else %}—{% endif %}</span><span id="pallet-known-total">{% if scanner_state.expected_pallet_count != None %}/{{ scanner_state.expected_pallet_count }}{% endif %}</span></span>
-        {% endif %}
-      </h1>
-      <p><strong>{{ container.customer.code }}</strong> · {{ container.customer.name }}</p>
+    <div class="scanner-header-identifiers" aria-label="First Scan container and Job Order">
+      <h1>PON – First Scan – {{ container.job_order|default:"—" }} – {{ container.identifier }}</h1>
     </div>
-    <a class="button secondary" href="{% url 'receiving:container_detail' container.pk %}#receive">Back to container</a>
+    <div class="scanner-header-actions">
+      {% if session and session.status == 'ACTIVE' %}
+      <form method="post">{% csrf_token %}<input type="hidden" name="action" value="pause"><button class="button secondary scanner-icon-control" type="submit" aria-label="Pause scanning" title="Pause scanning">&#10074;&#10074;</button></form>
+      {% elif session and session.status == 'PAUSED' %}
+      <form method="post">{% csrf_token %}<input type="hidden" name="action" value="resume"><button class="button primary scanner-icon-control" type="submit" aria-label="Resume scanning" title="Resume scanning">&#9654;</button></form>
+      {% endif %}
+      <a class="button secondary scanner-back-link" href="{% url 'receiving:container_detail' container.pk %}#receive">Back to container</a>
+    </div>
   </div>
 
   {% if not session %}
@@ -73,7 +76,6 @@
   {% else %}
   {{ scanner_state|json_script:"scanner-state" }}
   <section class="scanner-live" data-session-status="{{ session.status }}">
-    <div class="scanner-current-pallet-line">Current pallet:<strong id="current-pallet">{% if scanner_state.current_pallet %}{{ scanner_state.current_pallet }}{% else %}Scan pallet first{% endif %}</strong></div>
 
     <div id="scanner-feedback" class="scanner-feedback" aria-live="assertive"></div>
 
@@ -97,29 +99,18 @@
     {% endif %}
 
     <section class="card scanner-recent-card">
-      <div class="table-heading"><h2>Recent scans</h2><small>Latest 10 bikes</small></div>
-      <div class="table-wrap">
-        <table class="scanner-history-table">
-          <thead><tr><th>Pallet</th><th>Scanned codes</th><th>Result</th></tr></thead>
-          <tbody id="recent-scans-body">
-          {% for item in scanner_state.recent %}
-            <tr>
-              <td class="scanner-history-pallet">{{ item.pallet|default:"—" }}</td>
-              <td>
-                {% if scanner_state.code_mode == "TWO_CODES" %}
-                  <div class="scanner-history-code">{{ item.resolved_code|default:item.scanned_value }}</div>
-                  {% if item.long_code %}<div class="scanner-history-long">{{ item.long_code }}</div>{% endif %}
-                {% else %}
-                  <div class="scanner-history-code">{{ item.scanned_value }}</div>
-                {% endif %}
-              </td>
-              <td class="scanner-result-{{ item.result }}">{{ item.message }}</td>
-            </tr>
-          {% empty %}
-            <tr class="empty-row"><td colspan="3">No bike scans yet.</td></tr>
+      <h2>Scan history</h2>
+      <div id="scanner-history-blocks">
+        {% for block in scanner_state.history_blocks %}
+        <section class="scanner-history-block">
+          <h3 class="scanner-history-block-title">{{ block.number|stringformat:"02d" }}-{{ block.pallet }}</h3>
+          {% for bike in block.bikes %}
+          <div class="scanner-history-bike"><div class="scanner-history-code">{{ bike.code }}</div>{% if bike.long_code %}<div class="scanner-history-long">{{ bike.long_code }}</div>{% endif %}</div>
           {% endfor %}
-          </tbody>
-        </table>
+        </section>
+        {% empty %}
+        <p>No pallet scans yet.</p>
+        {% endfor %}
       </div>
     </section>
 
@@ -130,11 +121,6 @@
     </div>
 
     <div class="scanner-controls">
-      {% if session.status == 'ACTIVE' %}
-      <form method="post">{% csrf_token %}<input type="hidden" name="action" value="pause"><button class="button secondary" type="submit">Pause Scan</button></form>
-      {% else %}
-      <form method="post">{% csrf_token %}<input type="hidden" name="action" value="resume"><button class="button primary" type="submit">Resume Scan</button></form>
-      {% endif %}
       <form method="post">{% csrf_token %}<input type="hidden" name="action" value="finish"><button class="button secondary" type="submit">Finish Scan</button></form>
     </div>
 
@@ -174,54 +160,45 @@
       document.getElementById('active-time').textContent = formatDuration(active);
     };
 
-    const renderRecent = (items) => {
-      const body = document.getElementById('recent-scans-body');
-      body.replaceChildren();
-      if (!items.length) {
-        const row = document.createElement('tr');
-        row.className = 'empty-row';
-        const cell = document.createElement('td');
-        cell.colSpan = 3;
-        cell.textContent = 'No bike scans yet.';
-        row.appendChild(cell);
-        body.appendChild(row);
+    const renderHistory = (blocks) => {
+      const root = document.getElementById('scanner-history-blocks');
+      root.replaceChildren();
+      if (!blocks.length) {
+        const empty = document.createElement('p');
+        empty.textContent = 'No pallet scans yet.';
+        root.appendChild(empty);
         return;
       }
-      items.forEach((item) => {
-        const row = document.createElement('tr');
-        const pallet = document.createElement('td');
-        pallet.className = 'scanner-history-pallet';
-        pallet.textContent = item.pallet || '—';
-
-        const value = document.createElement('td');
-        const mainCode = document.createElement('div');
-        mainCode.className = 'scanner-history-code';
-        mainCode.textContent = state.code_mode === 'TWO_CODES' ? (item.resolved_code || item.scanned_value) : item.scanned_value;
-        value.appendChild(mainCode);
-        if (state.code_mode === 'TWO_CODES' && item.long_code) {
-          const longCode = document.createElement('div');
-          longCode.className = 'scanner-history-long';
-          longCode.textContent = item.long_code;
-          value.appendChild(longCode);
-        }
-
-        const result = document.createElement('td');
-        result.className = `scanner-result-${item.result}`;
-        result.textContent = item.message;
-        row.append(pallet, value, result);
-        body.appendChild(row);
+      blocks.forEach((block) => {
+        const section = document.createElement('section');
+        section.className = 'scanner-history-block';
+        const title = document.createElement('h3');
+        title.className = 'scanner-history-block-title';
+        title.textContent = `${String(block.number).padStart(2, '0')}-${block.pallet}`;
+        section.appendChild(title);
+        block.bikes.forEach((bike) => {
+          const item = document.createElement('div');
+          item.className = 'scanner-history-bike';
+          const code = document.createElement('div');
+          code.className = 'scanner-history-code';
+          code.textContent = bike.code;
+          item.appendChild(code);
+          if (bike.long_code) {
+            const longCode = document.createElement('div');
+            longCode.className = 'scanner-history-long';
+            longCode.textContent = bike.long_code;
+            item.appendChild(longCode);
+          }
+          section.appendChild(item);
+        });
+        root.appendChild(section);
       });
     };
 
     const renderState = (nextState) => {
       state = nextState;
       clockBase = Date.now();
-      document.getElementById('current-pallet').textContent = state.current_pallet || 'Scan pallet first';
-      const palletPosition = document.getElementById('pallet-position');
-      const palletKnownTotal = document.getElementById('pallet-known-total');
-      if (palletPosition) palletPosition.textContent = state.pallet_position || '—';
-      if (palletKnownTotal) palletKnownTotal.textContent = state.expected_pallet_count === null ? '' : `/${state.expected_pallet_count}`;
-      renderRecent(state.recent);
+      renderHistory(state.history_blocks);
       renderTimers();
     };
 
@@ -246,7 +223,7 @@
           });
           const payload = await response.json();
           feedback.className = `scanner-feedback ${payload.level}`;
-          feedback.textContent = payload.message;
+          feedback.textContent = payload.level === 'success' ? '' : payload.message;
           renderState(payload.state);
           input.value = '';
         } catch (error) {
@@ -285,7 +262,7 @@
         const payload = await response.json();
         const feedback = document.getElementById('scanner-feedback');
         feedback.className = `scanner-feedback ${payload.level}`;
-        feedback.textContent = payload.message;
+        feedback.textContent = payload.level === 'success' ? '' : payload.message;
         renderState(payload.state);
         if (payload.ok) photoForm.reset();
         const scanInput = document.getElementById('scanned-value');

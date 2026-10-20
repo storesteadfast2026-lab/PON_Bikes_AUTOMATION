@@ -1,0 +1,52 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20261020141245
+Username: STEADFAST\fabian
+RunAs User: STEADFAST\fabian
+Configuration Name: 
+Machine: DELL-7020-07 (Microsoft Windows NT 10.0.26200.0)
+Host Application: powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Docker-Projects\PON_Bikes_Automation\Export PON New Measurements\Export_PON_Truly_New_Measurements.ps1
+Process ID: 2464
+PSVersion: 5.1.26100.9711
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9711
+BuildVersion: 10.0.26100.9711
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+============================================================
+PON - EXPORT TRULY NEW PRODUCT MEASUREMENTS
+Search          : ONEU6047465
+Classification  : Historical NEW only (PBP_TO_PON excluded)
+Excel layout    : Original 14-column New Products, one sheet
+Execution       : One step, open in Excel automatically
+Production data : READ ONLY
+============================================================
+
+[INFO] Resolving Container / Job Order and generating the original Excel layout...
+=================================================================
+CONTAINER: ONEU6047465 | JOB ORDER: 1773600
+Historical NEW: 4 | PBP_TO_PON excluded: 3 | Other excluded: 122
+NEW SKUs exported:
+  NEW  0L0CABFX1C48 | Bikes: 1
+  NEW  0M0STBUI1C61 | Bikes: 1
+  NEW  0M0STBUI2C61 | Bikes: 1
+  NEW  0M0STBVX2C61 | Bikes: 1
+PBP_TO_PON SKUs excluded:
+  PBP  0L0CABFX1C54
+  PBP  0L0CABFX1C56
+  PBP  0L0CABFX2C48
+=================================================================
+[PASS] Excel created: /tmp/pon_new_measure_20261020_141245_642.xlsx; Products: 4
+PON_EXPORT_CONTAINER_ID=ONEU6047465
+
+[PASS] Container: ONEU6047465
+[PASS] Excel saved: C:\Docker-Projects\PON_Bikes_Automation\Export PON New Measurements\ONEU6047465_New_Products_Measurements.xlsx
+[PASS] SHA256: 0D79C90427516D13F71522A7C72D8E616CD89D619A9566785652C13966EBBEA6
+[PASS] Excel opened using the default spreadsheet application.
+**********************
+Windows PowerShell transcript end
+End time: 20261020141254
+**********************

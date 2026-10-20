@@ -1,0 +1,22 @@
+{
+  "result": "PASS",
+  "passed": 12,
+  "failed": 0,
+  "cases": [
+    "Job Order 1773600 resolves ONEU with 4 NEW, 3 PBP excluded",
+    "Container ID lookup matches Job Order output",
+    "ONEU 4 NEW only; 3 PBP wholly absent",
+    "Original Excel sheet, cells and formatting are XML-identical",
+    "Other container dynamic NEW-only filtering",
+    "Conflicting historical status fails closed",
+    "Incomplete measurement blocks output",
+    "ONEU acceptance guard blocks unexpected NEW changes",
+    "Unknown Job Order fails without producing Excel",
+    "Unsafe Container / Job Order input rejected",
+    "No database writes in exporter source",
+    "Single-prompt PowerShell, auto-open, raw-byte Docker transfer"
+  ],
+  "limitations": [
+    "Windows PowerShell 5.1, Docker Compose, production DB and Excel GUI not available for end-to-end execution"
+  ]
+}

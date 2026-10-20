@@ -1,0 +1,16 @@
+﻿{
+    "package_id":  "PON.UPStockSerial.Update.LegacyMovementOrder.Fix4.v1020.0958",
+    "project":  "C:\\Docker-Projects\\PON_Bikes_Automation",
+    "backup_dir":  "C:\\Docker-Projects\\PON_Bikes_Automation_Backups\\UPStockLegacyOrder_20261020_100157_045",
+    "installed_at":  "2026-10-20T10:02:48.2217879+10:30",
+    "old_services_sha256":  "970d5f844b427d33d4b3bcc644788c202ecb7c6d5ba64432c802eaefec20f386",
+    "new_services_sha256":  "aac61add03fc5fb86b81b23cb247b95d88066315db357ae2e0de5ec13a741507",
+    "new_test_sha256":  "0447866e11dded530aa2c96b105a00a1d4e689fc77ca0b944f7783a1a85db40c",
+    "test_created_by_package":  true,
+    "database_or_migrations_changed":  false,
+    "baseline_django_status":  "KNOWN_UI_BASELINE",
+    "candidate_django_status":  "KNOWN_UI_BASELINE",
+    "baseline_test_count":  167,
+    "candidate_test_count":  176,
+    "existing_ui_test_failure_remains":  true
+}
