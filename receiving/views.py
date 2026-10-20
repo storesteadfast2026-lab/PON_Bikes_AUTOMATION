@@ -772,7 +772,8 @@ def _container_workspace_data(container):
     )
     migration_group1_ready = all(
         (
-            manifest_group1_resolution
+            _pbp_group1_mapping(container, row, group1_rules, allow_historical_lookup=True)
+            or manifest_group1_resolution
             or resolve_group1_family(
                 (row.get("pbp_to_pon_data") or {}).get("long_name")
                 or getattr(definitions.get(row["code"]), "full_name", ""),
@@ -1296,25 +1297,34 @@ def _first_scan_state(session):
     end_time = session.finished_at or timezone.now()
     elapsed_seconds = max(0, int((end_time - session.started_at).total_seconds()))
     paused_seconds = _first_scan_pause_seconds(session, end_time)
-    # Keep the live screen minimal: the recent list is the operator's visual
-    # confirmation, so show the latest completed bikes across pallets instead of
-    # repeating only the current pallet. Scanner/registration behaviour is unchanged.
-    recent = []
-    for event in session.events.filter(
-        event_type="BIKE",
-        normalized_line__isnull=False,
-    ).order_by("-scanned_at", "-pk")[:10]:
-        recent.append({
-            "id": event.pk,
-            "time": timezone.localtime(event.scanned_at).strftime("%H:%M:%S"),
-            "input_type": event.get_input_type_display(),
-            "scanned_value": event.scanned_value,
-            "resolved_code": event.resolved_code,
-            "long_code": event.long_code,
-            "pallet": event.pallet,
-            "result": event.result.lower(),
-            "message": event.message,
-        })
+    # Presentation-only chronology: reconstruct pallet blocks from persisted events.
+    # A return to an earlier pallet creates a new block; a repeated scan of the
+    # current pallet does not. Do not change scan registration or persisted data.
+    history_blocks = []
+    for event in session.events.order_by("scanned_at", "pk"):
+        if event.event_type == "PALLET" and event.result == "SUCCESS" and event.pallet:
+            pallet = str(event.pallet).strip()
+            if not history_blocks or history_blocks[-1]["pallet"].upper() != pallet.upper():
+                history_blocks.append({
+                    "number": len(history_blocks) + 1,
+                    "pallet": pallet,
+                    "bikes": [],
+                })
+        elif event.event_type == "BIKE" and event.normalized_line_id:
+            pallet = str(event.pallet or "").strip()
+            if not history_blocks or history_blocks[-1]["pallet"].upper() != pallet.upper():
+                # Legacy sessions may lack an explicit PALLET event.
+                history_blocks.append({
+                    "number": len(history_blocks) + 1,
+                    "pallet": pallet,
+                    "bikes": [],
+                })
+            history_blocks[-1]["bikes"].insert(0, {
+                "id": event.pk,
+                "code": event.resolved_code or event.scanned_value,
+                "long_code": event.long_code or "",
+            })
+    history_blocks.reverse()
     pallet_events = list(
         session.events.filter(event_type="PALLET", result="SUCCESS")
         .exclude(pallet="")
@@ -1389,7 +1399,7 @@ def _first_scan_state(session):
         "paused_seconds": paused_seconds,
         "active_seconds": max(0, elapsed_seconds - paused_seconds),
         "last_scan": last_scan,
-        "recent": recent,
+        "history_blocks": history_blocks,
     }
 
 
@@ -3116,6 +3126,63 @@ def _group1_resolution_from_manifest_rule(rule, customer):
     }
 
 
+
+def _pbp_group1_mapping(container, row, group1_rules, *, allow_historical_lookup=False):
+    """Resolve an original PBP Group1 to PON without guessing from a model name.
+
+    Source: historical PBP Product Check snapshot, then (only when explicitly
+    allowed) the catalog PBP entry present at original classification time.
+    Never interpret a PON entry as the original PBP family.
+    Returns None only when no trustworthy PBP Group1 is available; callers can
+    retain their pre-existing manifest/description fallback in that case.
+    """
+    history = row.get("pbp_to_pon_data") or {}
+    saved = history.get("_check_row") or {}
+    source = str(history.get("source_pbp_group1") or "").strip().upper()
+    if not source:
+        for candidate in (row, saved):
+            if str(candidate.get("catalog_customer") or "").strip().upper() == "PBP":
+                source = str(candidate.get("catalog_group1") or "").strip().upper()
+                if source:
+                    break
+
+    if not source and allow_historical_lookup:
+        state = container.product_statuses.filter(
+            code=row["code"], import_classification="PBP_TO_PON"
+        ).first()
+        if state:
+            matching = ProductCatalogEntry.objects.filter(
+                Q(code=row["code"]) | Q(pon_sku=row["code"]) | Q(code2=row["code"]),
+                customer__iexact="PBP",
+                catalog__uploaded_at__lte=state.classified_at,
+            ).filter(
+                Q(catalog__customer=container.customer) | Q(catalog__customer__isnull=True)
+            ).order_by("-catalog__uploaded_at", "source_row", "pk")
+            entry = matching.first()
+            if entry:
+                source = str(entry.group1 or "").strip().upper()
+
+    if not source:
+        return None
+
+    # Group1Family is the authoritative active PBP<->PON suffix relationship.
+    # Do not copy the source Group1 itself, strip a guessed suffix, or change
+    # a PBP row to PON. Reject missing or conflicting relationships.
+    matches = [rule for rule in group1_rules
+               if getattr(rule, "active", True)
+               and str(getattr(rule, "pbp_group1", "") or "").strip().upper() == source]
+    if len(matches) != 1:
+        reason = "unmapped_pbp_group1" if not matches else "ambiguous_pbp_group1"
+        return {"resolved": False, "reason": reason,
+                "source_pbp_group1": source,
+                "message": f"Original PBP Group1 {source} has no unique active Group1 family mapping."}
+    rule = matches[0]
+    return {"resolved": True, "reason": "original_pbp_group1",
+            "id": rule.pk, "family_name": rule.family_name,
+            "suffix": rule.suffix, "source_pbp_group1": source,
+            "group1": rule.pon_group1}
+
+
 def _product_check_data(container):
     catalog = _active_catalog_for_customer(container.customer)
     received_batch = ImportBatch.objects.filter(
@@ -3318,10 +3385,14 @@ def product_check(request, pk):
             )
             if str(value or "").strip()
         )
-        group1_resolution = manifest_group1_resolution or resolve_group1_family(
-            group1_match_text,
-            export_configuration["TL_CUSTOMER"],
-            group1_rules,
+        group1_resolution = (
+            (_pbp_group1_mapping(container, row, group1_rules, allow_historical_lookup=True) if row.get("is_pbp_to_pon") else None)
+            or manifest_group1_resolution
+            or resolve_group1_family(
+                group1_match_text,
+                export_configuration["TL_CUSTOMER"],
+                group1_rules,
+            )
         )
         if not group1_resolution.get("resolved"):
             unresolved_group1_count += 1
@@ -3499,13 +3570,14 @@ def export_new_products(request, pk):
         fallback = definitions.get(code)
         full_name = history.get("long_name") or getattr(fallback, "full_name", "")
         short_name = history.get("short_name") or getattr(fallback, "short_name", "")
-        resolution = manifest_group1_resolution or resolve_group1_family(
-            full_name,
-            "PON",
-            group1_rules,
+        resolution = (
+            _pbp_group1_mapping(container, row, group1_rules, allow_historical_lookup=True)
+            or manifest_group1_resolution
+            or resolve_group1_family(full_name, "PON", group1_rules)
         )
         if not resolution.get("resolved"):
-            unresolved.append(code)
+            source_group1 = resolution.get("source_pbp_group1", "")
+            unresolved.append(f"{code} (PBP Group1: {source_group1}; no unique active mapping)" if source_group1 else code)
             continue
 
         if history.get("valid"):
